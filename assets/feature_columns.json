@@ -1,0 +1,10 @@
+[
+  "sqft",
+  "beds",
+  "age",
+  "city_val",
+  "property_type",
+  "lot_size",
+  "school_rating",
+  "crime_index"
+]
