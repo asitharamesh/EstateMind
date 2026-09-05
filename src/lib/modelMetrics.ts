@@ -39,7 +39,8 @@ export function resolveModelMetrics(
 }
 
 export async function fetchModelMetrics(): Promise<ModelMetrics> {
-  const response = await fetch("/api/model-metrics");
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+  const response = await fetch(`${baseUrl}/api/model-metrics`);
   if (!response.ok) {
     throw new Error("Unable to load model metrics");
   }

@@ -3,9 +3,17 @@ export type PropertyType = "apartment" | "house" | "villa" | "studio";
 export interface PredictionInput {
   sqft: number;
   bedrooms: number;
+  bathrooms: number;
   city: string;
   ageYears: number;
   propertyType: PropertyType;
+}
+
+export interface PredictionFactor {
+  feature: string;
+  label: string;
+  contribution: number;
+  share: number;
 }
 
 export interface PredictionResult {
@@ -15,32 +23,39 @@ export interface PredictionResult {
   tier: "Budget" | "Mid-Range" | "Luxury";
   tierScore: number;
   confidence: number;
-  factors: {
-    location: number;
-    size: number;
-    bedrooms: number;
-    age: number;
-    type: number;
-  };
+  factors: PredictionFactor[];
   range: { low: number; high: number };
+  metro?: {
+    city: string;
+    metro: string;
+    scaleVsTrainingMetro: number;
+    source: string;
+    asOf: string;
+  };
+  /** "model" when served by the live FastAPI + Random Forest backend,
+   * "offline-estimate" when the app fell back to the local heuristic
+   * because the backend was unreachable. Surface this in the UI so a
+   * fallback number is never presented as if it were the real model. */
+  source: "model" | "offline-estimate";
 }
 
-export const CITIES: Record<
-  string,
-  { multiplier: number; baseSqft: number; label: string; region: string }
-> = {
-  "san-francisco": { multiplier: 2.85, baseSqft: 1100, label: "San Francisco", region: "West Coast" },
-  "new-york": { multiplier: 2.7, baseSqft: 1250, label: "New York", region: "East Coast" },
-  "los-angeles": { multiplier: 2.2, baseSqft: 850, label: "Los Angeles", region: "West Coast" },
-  "seattle": { multiplier: 1.85, baseSqft: 720, label: "Seattle", region: "West Coast" },
-  "boston": { multiplier: 1.95, baseSqft: 780, label: "Boston", region: "East Coast" },
-  "miami": { multiplier: 1.6, baseSqft: 620, label: "Miami", region: "South" },
-  "austin": { multiplier: 1.45, baseSqft: 540, label: "Austin", region: "South" },
-  "chicago": { multiplier: 1.25, baseSqft: 460, label: "Chicago", region: "Midwest" },
-  "denver": { multiplier: 1.4, baseSqft: 520, label: "Denver", region: "Mountain" },
-  "atlanta": { multiplier: 1.15, baseSqft: 410, label: "Atlanta", region: "South" },
-  "dallas": { multiplier: 1.2, baseSqft: 430, label: "Dallas", region: "South" },
-  "phoenix": { multiplier: 1.1, baseSqft: 390, label: "Phoenix", region: "Southwest" },
+// Display metadata only (labels/regions for the dropdown) - no pricing
+// numbers live here. Real per-metro pricing comes from the backend's
+// metro_price_index.json, which is derived from Zillow's public ZHVI data
+// at training time (see scripts/train_model.py).
+export const CITIES: Record<string, { label: string; region: string }> = {
+  "san-francisco": { label: "San Francisco", region: "West Coast" },
+  "new-york": { label: "New York", region: "East Coast" },
+  "los-angeles": { label: "Los Angeles", region: "West Coast" },
+  "seattle": { label: "Seattle", region: "West Coast" },
+  "boston": { label: "Boston", region: "East Coast" },
+  "miami": { label: "Miami", region: "South" },
+  "austin": { label: "Austin", region: "South" },
+  "chicago": { label: "Chicago", region: "Midwest" },
+  "denver": { label: "Denver", region: "Mountain" },
+  "atlanta": { label: "Atlanta", region: "South" },
+  "dallas": { label: "Dallas", region: "South" },
+  "phoenix": { label: "Phoenix", region: "Southwest" },
 };
 
 const PROPERTY_TYPE_MULT: Record<PropertyType, number> = {
@@ -69,56 +84,76 @@ export function getGaugeAngle(score: number): number {
 export function normalizeInput(input: PredictionInput): PredictionInput {
   return {
     ...input,
-    sqft: clamp(input.sqft, 500, 6000),
-    bedrooms: clamp(input.bedrooms, 1, 6),
-    ageYears: clamp(input.ageYears, 0, 80),
+    sqft: clamp(input.sqft, 500, 8000),
+    bedrooms: clamp(input.bedrooms, 0, 10),
+    bathrooms: clamp(input.bathrooms, 0.5, 8),
+    ageYears: clamp(input.ageYears, 0, 115),
   };
 }
 
-function fallbackPredict(input: PredictionInput): PredictionResult {
+let cachedMetroIndex: Record<string, { zhviLatest: number; scaleVsTrainingMetro: number }> | null = null;
+
+/**
+ * Offline fallback only: used when the FastAPI backend cannot be reached.
+ * It reuses the same real, cited Zillow metro index the backend trains
+ * with (fetched from the static /metro-price-index.json snapshot written
+ * by scripts/train_model.py) so even the fallback numbers are anchored to
+ * real published data rather than an invented per-city multiplier. If that
+ * snapshot itself can't be loaded, this throws rather than silently
+ * guessing - callers must treat total failure as "no estimate available".
+ */
+async function loadMetroIndex() {
+  if (cachedMetroIndex) return cachedMetroIndex;
+  const response = await fetch("/metro-price-index.json");
+  if (!response.ok) throw new Error("Metro price index unavailable");
+  const data = await response.json();
+  cachedMetroIndex = data.cities;
+  return cachedMetroIndex!;
+}
+
+async function fallbackPredict(input: PredictionInput): Promise<PredictionResult> {
   const normalizedInput = normalizeInput(input);
-  const city = CITIES[normalizedInput.city] ?? CITIES["austin"];
-  const baseSqft = city.baseSqft;
-  const bedFactor = 0.92 + Math.log2(normalizedInput.bedrooms + 1) * 0.09;
-  const ageFactor = clamp(1 - normalizedInput.ageYears * 0.007, 0.75, 1.05);
+  const metroIndex = await loadMetroIndex();
+  const metro = metroIndex[normalizedInput.city] ?? metroIndex["seattle"];
+
+  // Rough physical-value heuristic (NOT the trained model): a simple
+  // price-per-sqft baseline scaled by the same real Zillow metro ratio the
+  // backend uses. This exists purely so the UI degrades gracefully when the
+  // API is down - it is always labeled `source: "offline-estimate"`.
+  const basePricePerSqft = 220; // derived from the real training data's
+  // overall price/sqft_living average (~King County, 2014-15); see README.
   const typeFactor = PROPERTY_TYPE_MULT[normalizedInput.propertyType];
-  const sizeFactor = clamp(1.05 - (normalizedInput.sqft - 1500) / 25000, 0.88, 1.08);
-  const pricePerSqft = baseSqft * bedFactor * ageFactor * typeFactor * sizeFactor;
-  const price = Math.round(pricePerSqft * normalizedInput.sqft);
-  const marketAvgPerSqft = Math.round(baseSqft * city.multiplier * 0.55);
-  const tierScore = clamp(Math.log10(price / 100000) * 35, 0, 100);
-  const tier = getTierFromScore(tierScore);
-  const rawLocation = city.multiplier * 30;
-  const rawSize = (normalizedInput.sqft / 1000) * 18;
-  const rawBeds = normalizedInput.bedrooms * 6;
-  const rawAge = Math.max(0, 25 - normalizedInput.ageYears * 0.6);
-  const rawType = typeFactor * 18;
-  const sum = rawLocation + rawSize + rawBeds + rawAge + rawType;
-  const factors = {
-    location: Math.round((rawLocation / sum) * 100),
-    size: Math.round((rawSize / sum) * 100),
-    bedrooms: Math.round((rawBeds / sum) * 100),
-    age: Math.round((rawAge / sum) * 100),
-    type: Math.round((rawType / sum) * 100),
-  };
-  const sqftPenalty = normalizedInput.sqft < 500 || normalizedInput.sqft > 6000 ? 15 : 0;
-  const agePenalty = normalizedInput.ageYears > 80 ? 10 : 0;
-  const confidence = clamp(94 - sqftPenalty - agePenalty, 60, 97);
-  const spread = (1 - confidence / 100) * 1.4;
-  const range = {
-    low: Math.round(price * (1 - spread)),
-    high: Math.round(price * (1 + spread)),
-  };
+  const ageFactor = clamp(1 - normalizedInput.ageYears * 0.004, 0.7, 1.05);
+  const bedBathFactor = 0.85 + Math.log2(normalizedInput.bedrooms + normalizedInput.bathrooms + 1) * 0.08;
+
+  const trainingMetroPrice =
+    basePricePerSqft * normalizedInput.sqft * typeFactor * ageFactor * bedBathFactor;
+  const price = Math.round(trainingMetroPrice * metro.scaleVsTrainingMetro);
+  const pricePerSqft = Math.round(price / normalizedInput.sqft);
+  const marketAvgPerSqft = Math.round(metro.zhviLatest / 1910);
+
+  const ratioToMetro = price / metro.zhviLatest;
+  const tierScore = clamp(ratioToMetro * 50, 0, 100);
+  const tier = ratioToMetro < 0.7 ? "Budget" : ratioToMetro >= 1.4 ? "Luxury" : "Mid-Range";
+
+  const confidence = 55; // fixed, low: this is a heuristic, not a model - we
+  // don't pretend to know its uncertainty the way we do for the real
+  // tree-ensemble spread the backend reports.
+  const spread = 0.35;
 
   return {
     price,
-    pricePerSqft: Math.round(pricePerSqft),
+    pricePerSqft,
     marketAvgPerSqft,
     tier,
     tierScore,
     confidence,
-    factors,
-    range,
+    factors: [],
+    range: {
+      low: Math.round(price * (1 - spread)),
+      high: Math.round(price * (1 + spread)),
+    },
+    source: "offline-estimate",
   };
 }
 
@@ -131,13 +166,7 @@ export async function predictPrice(input: PredictionInput): Promise<PredictionRe
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sqft: normalizedInput.sqft,
-        bedrooms: normalizedInput.bedrooms,
-        city: normalizedInput.city,
-        ageYears: normalizedInput.ageYears,
-        propertyType: normalizedInput.propertyType,
-      }),
+      body: JSON.stringify(normalizedInput),
     });
 
     if (response.ok) {
@@ -151,10 +180,12 @@ export async function predictPrice(input: PredictionInput): Promise<PredictionRe
         confidence: data.confidence,
         factors: data.factors,
         range: data.range,
+        metro: data.metro,
+        source: "model",
       };
     }
   } catch {
-    // Fall back to the deterministic local model when the API is unavailable.
+    // Backend unreachable - fall back to the labeled offline heuristic below.
   }
 
   return fallbackPredict(normalizedInput);
@@ -170,33 +201,29 @@ export function formatCurrencyFull(n: number) {
   return `$${n.toLocaleString()}`;
 }
 
-export const FEATURE_IMPORTANCE = [
-  { feature: "Location (City)", importance: 0.32 },
-  { feature: "Square Footage", importance: 0.27 },
-  { feature: "Bedrooms", importance: 0.11 },
-  { feature: "Property Type", importance: 0.1 },
-  { feature: "Property Age", importance: 0.08 },
-  { feature: "Lot Size", importance: 0.05 },
-  { feature: "School Rating", importance: 0.04 },
-  { feature: "Crime Index", importance: 0.03 },
-];
-
-export const CORRELATION_FEATURES = ["Price", "SqFt", "Beds", "Age", "Loc", "Type"];
-
-export const CORRELATION_MATRIX: number[][] = [
-  [1.0, 0.78, 0.62, -0.41, 0.71, 0.45],
-  [0.78, 1.0, 0.69, -0.18, 0.22, 0.38],
-  [0.62, 0.69, 1.0, -0.12, 0.15, 0.41],
-  [-0.41, -0.18, -0.12, 1.0, -0.09, -0.22],
-  [0.71, 0.22, 0.15, -0.09, 1.0, 0.19],
-  [0.45, 0.38, 0.41, -0.22, 0.19, 1.0],
-];
-
-export const TRAINING_HISTORY = Array.from({ length: 20 }, (_, i) => {
-  const epoch = i + 1;
-  return {
-    epoch,
-    train: +(0.55 + Math.log10(epoch + 1) * 0.22 + (i > 12 ? 0.04 : 0)).toFixed(3),
-    val: +(0.52 + Math.log10(epoch + 1) * 0.21).toFixed(3),
+export interface ModelInsights {
+  featureImportance: { feature: string; importance: number }[];
+  correlationMatrix: { features: string[]; matrix: number[][] };
+  trainingHistory: { estimators: number; trainR2: number; oobR2: number }[];
+  metroPriceIndex: {
+    source: string;
+    sourceUrl: string;
+    trainingMetro: string;
+    trainingReferenceDate: string;
+    latestDate: string;
+    cities: Record<string, { metro: string; zhviLatest: number; scaleVsTrainingMetro: number }>;
   };
-});
+}
+
+/** Real model internals (feature importances, correlation matrix, learning
+ * curve, cited metro index) computed once at training time by
+ * scripts/train_model.py and served by the backend - nothing here is
+ * hardcoded in the frontend. */
+export async function fetchModelInsights(): Promise<ModelInsights> {
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+  const response = await fetch(`${baseUrl}/api/model-insights`);
+  if (!response.ok) {
+    throw new Error("Unable to load model insights");
+  }
+  return response.json();
+}
