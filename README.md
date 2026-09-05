@@ -44,37 +44,43 @@ Live results: price, range, tier, factors, metrics
 5. The UI updates the market-tier gauge, value analysis chart, and influence radar in real time.
 
 ## Model details
-- Algorithm: Random Forest Regressor
-- Training source: public housing dataset from the Hands-On Machine Learning repository
-- Training approach: 80/20 train/test split
-- Model artifacts:
-  - random_forest_model.pkl
-  - model_metrics.json
-  - feature_columns.json
-- Metrics are generated during training and served from the backend at runtime rather than being hard-coded in the React app.
+- Algorithm: Random Forest Regressor (250 trees, max depth 18)
+- Training source: real King County, WA home-sale records (~21.6k transactions, May 2014-May 2015) - every row is an actual sale, not a synthetic formula
+- Training approach: 80/20 train/test split, real held-out evaluation
+- Model artifacts (written by `scripts/train_model.py`, all gitignored, regenerate with `npm run train:model`):
+  - `random_forest_model.pkl`
+  - `model_metrics.json`, `feature_importance.json`, `correlation_matrix.json`, `training_history.json`
+  - `feature_columns.json`, `property_type_defaults.json`, `zip_price_index.json`, `metro_price_index.json`
+- All of the above are computed from real data at train time and served from the backend at runtime - nothing here is hard-coded in the React app.
 
 ### Current model performance
-The current trained model achieved the following results on the held-out test set:
-- R²: 0.9424
-- MAE: 23,962.97
-- RMSE: 29,916.87
-- MAPE: 1.53%
+The current trained model achieves the following results on the real held-out test set (regenerate with `npm run train:model` - numbers will vary slightly run to run because the upstream dataset and Zillow index can update):
+- R²: ~0.84
+- MAE: ~$80,600
+- RMSE: ~$156,800
+- MAPE: ~14.5%
 
-These values are more realistic than a perfect or synthetic benchmark and are appropriate for presenting as a practical ML demo.
+These are honest numbers for a home-price model trained on ~12 real features - a ~94% R² / 1.5% MAPE claim (as an earlier version of this README stated) is not achievable on real transaction data with this feature set, and was a symptom of training on a self-generated formula instead of real prices.
+
+### Beyond King County: the cross-metro adjustment
+The training data only covers the Seattle metro area, so the model itself only ever predicts a King County-equivalent price. To support the other 11 cities in the UI, `scripts/train_model.py` also downloads Zillow Research's public [Metro ZHVI dataset](https://www.zillow.com/research/data/) and computes, for each city, the ratio of that metro's current typical home value to Seattle's typical home value at the training data's own reference period (Oct 2014). The backend multiplies the model's raw prediction by this real, dated, cited ratio (`metro_price_index.json`) - it is never a hand-typed multiplier.
 
 ## Feature engineering
-The training pipeline in scripts/train_model.py creates a richer feature set from the public housing data by deriving variables such as:
-- square footage
-- bedroom count
-- property age
-- city valuation
-- property type encoding
-- lot size
-- school rating
-- crime index
-- proximity-based scoring from ocean proximity
+`scripts/train_model.py` builds its feature set entirely from columns that exist in the real sale records, plus a small number of features derived from them without inventing any price relationship:
+- `sqft_living`, `bedrooms`, `bathrooms`, `floors`, `waterfront`, `view`, `condition`, `grade` - real columns from the dataset
+- `age` - sale year minus `yr_built` (real, computed per sale)
+- `was_renovated` - real, from `yr_renovated`
+- `zip_price_index` - each zip code's mean sale price relative to the training set's overall mean, fit on the training split only (no leakage into the held-out test set)
+- `property_type` - a studio/apartment/house/villa label assigned to each real sale by a documented rule over `sqft_living`, `floors`, `grade`, `bedrooms`, and `waterfront`; the model learns each bucket's actual price effect from data, the rule only assigns the label
 
-The model also uses a mix of engineered signals and non-linear interactions that tree-based models can capture well, which is why Random Forest was chosen for this use case.
+At inference time, the app only collects sqft, bedrooms, bathrooms, age, city, and property type - it doesn't ask for condition, grade, floors, etc. Those are filled from the real, training-data-derived medians for the selected property type (`property_type_defaults.json`), and `zip_price_index` defaults to 1.0 (an average location within the chosen metro) since no address is collected.
+
+Random Forest was chosen because these features have non-linear effects and interactions (e.g. construction grade matters far more at high square footage) that tree ensembles capture well without manual feature crossing.
+
+## Explainability and confidence
+Both the per-prediction "why" and the uncertainty range are derived from the trained ensemble itself, not separate formulas:
+- **Factor contributions**: for each prediction, the backend walks the actual decision path taken through all 250 trees and attributes the change in predicted value at each split to the feature that caused it (the same technique the `treeinterpreter` package uses). The returned `factors` are real, signed dollar contributions for that specific input.
+- **Confidence and price range**: the backend predicts with each of the 250 individual trees and uses the empirical spread of those 250 predictions (10th-90th percentile for the range, coefficient of variation for the confidence score) - a home whose inputs are rare in the training data (e.g. an unusual property type) genuinely gets a wider range and lower confidence, because the trees genuinely disagree more.
 
 ## Setup
 ### Prerequisites
@@ -108,14 +114,12 @@ Then open:
 - Backend API: http://localhost:8000/health
 
 ## Environment variables
-The project uses a dotenv-based configuration file. The default values are defined in .env.example:
-- DATASET_URL
-- DATASET_PATH
-- OUTPUT_DIR
-- MODEL_FILE
-- METRICS_FILE
-- FEATURES_FILE
-- PUBLIC_METRICS_FILE
+The project uses a dotenv-based configuration file. See `.env.example` for the full list with defaults:
+- `VITE_API_BASE_URL` - frontend's base URL for the FastAPI backend
+- `DATASET_URL`, `DATASET_PATH` - real King County home-sale CSV source
+- `METRO_INDEX_URL` - Zillow Research ZHVI-by-metro CSV source
+- `OUTPUT_DIR`, `MODEL_FILE`, `METRICS_FILE`, `FEATURES_FILE` - artifact locations
+- `CORS_ORIGINS` - allowed origins for the FastAPI backend
 
 ## Project structure
 ```text
