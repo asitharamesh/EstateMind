@@ -9,9 +9,13 @@ export default defineConfig(() => ({
     hmr: {
       overlay: false,
     },
+    // Forwards relative /api/* calls to the FastAPI backend during `npm run
+    // dev`, so the frontend never needs VITE_API_BASE_URL set (or CORS) for
+    // local development - only set that env var to point at a different or
+    // deployed backend.
     proxy: {
       "/api": {
-        target: process.env.VITE_API_BASE_URL || "http://127.0.0.1:8000",
+        target: process.env.API_PROXY_TARGET || "http://127.0.0.1:8000",
         changeOrigin: true,
       },
     },

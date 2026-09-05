@@ -30,11 +30,7 @@ coverage/
 assets/*.csv
 assets/*.pkl
 assets/*.json
-public/model-metrics.json
-public/feature-importance.json
-public/correlation-matrix.json
-public/training-history.json
-public/metro-price-index.json
+public/data/
 
 # Editor directories and files
 .vscode/*

@@ -96,15 +96,16 @@ let cachedMetroIndex: Record<string, { zhviLatest: number; scaleVsTrainingMetro:
 /**
  * Offline fallback only: used when the FastAPI backend cannot be reached.
  * It reuses the same real, cited Zillow metro index the backend trains
- * with (fetched from the static /metro-price-index.json snapshot written
- * by scripts/train_model.py) so even the fallback numbers are anchored to
- * real published data rather than an invented per-city multiplier. If that
- * snapshot itself can't be loaded, this throws rather than silently
- * guessing - callers must treat total failure as "no estimate available".
+ * with (fetched from the static /data/metro-price-index.json snapshot
+ * written by scripts/train_model.py) so even the fallback numbers are
+ * anchored to real published data rather than an invented per-city
+ * multiplier. If that snapshot itself can't be loaded, this throws rather
+ * than silently guessing - callers must treat total failure as "no
+ * estimate available".
  */
 async function loadMetroIndex() {
   if (cachedMetroIndex) return cachedMetroIndex;
-  const response = await fetch("/metro-price-index.json");
+  const response = await fetch("/data/metro-price-index.json");
   if (!response.ok) throw new Error("Metro price index unavailable");
   const data = await response.json();
   cachedMetroIndex = data.cities;
@@ -184,8 +185,16 @@ export async function predictPrice(input: PredictionInput): Promise<PredictionRe
         source: "model",
       };
     }
-  } catch {
-    // Backend unreachable - fall back to the labeled offline heuristic below.
+    console.warn(
+      `[predictPrice] ${url} responded ${response.status} - using the offline heuristic instead. ` +
+        "Is the backend running? (`npm run dev:api`, or `npm run dev:full` to start both.)",
+    );
+  } catch (err) {
+    console.warn(
+      `[predictPrice] could not reach ${url} - using the offline heuristic instead. ` +
+        "Is the backend running? (`npm run dev:api`, or `npm run dev:full` to start both.)",
+      err,
+    );
   }
 
   return fallbackPredict(normalizedInput);

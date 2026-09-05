@@ -334,6 +334,8 @@ def main() -> None:
     ZIP_PRICE_INDEX_PATH.write_text(json.dumps({str(k): v for k, v in zip_index.items()}, indent=2), encoding="utf-8")
     METRO_PRICE_INDEX_PATH.write_text(json.dumps(metro_price_index, indent=2), encoding="utf-8")
 
+    public_data_dir = PUBLIC_DIR / "data"
+    public_data_dir.mkdir(parents=True, exist_ok=True)
     for name, payload in [
         ("model-metrics.json", metrics),
         ("feature-importance.json", feature_importance),
@@ -341,7 +343,7 @@ def main() -> None:
         ("training-history.json", training_history),
         ("metro-price-index.json", metro_price_index),
     ]:
-        (PUBLIC_DIR / name).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        (public_data_dir / name).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     print(json.dumps(metrics, indent=2))
 
