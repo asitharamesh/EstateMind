@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="hsl(158, 78%, 52%)" />
+      <stop offset="1" stop-color="hsl(192, 90%, 55%)" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#g)" />
+  <g fill="hsl(222, 47%, 6%)">
+    <rect x="14" y="24" width="16" height="26" rx="1.5" />
+    <rect x="34" y="16" width="16" height="34" rx="1.5" />
+    <rect x="18" y="29" width="3.5" height="3.5" fill="hsl(158, 78%, 52%)" />
+    <rect x="24.5" y="29" width="3.5" height="3.5" fill="hsl(158, 78%, 52%)" />
+    <rect x="18" y="37" width="3.5" height="3.5" fill="hsl(158, 78%, 52%)" />
+    <rect x="24.5" y="37" width="3.5" height="3.5" fill="hsl(158, 78%, 52%)" />
+    <rect x="38" y="21" width="3.5" height="3.5" fill="hsl(192, 90%, 55%)" />
+    <rect x="44.5" y="21" width="3.5" height="3.5" fill="hsl(192, 90%, 55%)" />
+    <rect x="38" y="29" width="3.5" height="3.5" fill="hsl(192, 90%, 55%)" />
+    <rect x="44.5" y="29" width="3.5" height="3.5" fill="hsl(192, 90%, 55%)" />
+    <rect x="38" y="37" width="3.5" height="3.5" fill="hsl(192, 90%, 55%)" />
+    <rect x="44.5" y="37" width="3.5" height="3.5" fill="hsl(192, 90%, 55%)" />
+  </g>
+</svg>
