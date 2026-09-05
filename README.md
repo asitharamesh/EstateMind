@@ -105,17 +105,24 @@ npm run train:model
 
 ### Run the app
 ```bash
+npm run dev:full   # starts the FastAPI backend and the Vite frontend together
+```
+or, in two terminals:
+```bash
 npm run dev:api
 npm run dev
 ```
 
 Then open:
-- Frontend: http://localhost:5173
+- Frontend: http://localhost:8080
 - Backend API: http://localhost:8000/health
 
+The frontend calls relative `/api/*` paths in dev, which Vite proxies to the backend (see `vite.config.ts`) - no CORS setup or `VITE_API_BASE_URL` needed locally. If the backend isn't running, prediction requests fall back to a clearly-labeled offline heuristic and log a console warning explaining why - if you see that in the UI, start `npm run dev:api` (or `npm run dev:full`).
+
 ## Environment variables
-The project uses a dotenv-based configuration file. See `.env.example` for the full list with defaults:
-- `VITE_API_BASE_URL` - frontend's base URL for the FastAPI backend
+The project uses a dotenv-based configuration file. See `.env.example` for the full list with defaults - none are required for local dev:
+- `VITE_API_BASE_URL` - only set to point the built frontend at a specific/deployed backend; leave unset locally to use the Vite dev proxy
+- `API_PROXY_TARGET` - only needed if the backend runs on a non-default host/port
 - `DATASET_URL`, `DATASET_PATH` - real King County home-sale CSV source
 - `METRO_INDEX_URL` - Zillow Research ZHVI-by-metro CSV source
 - `OUTPUT_DIR`, `MODEL_FILE`, `METRICS_FILE`, `FEATURES_FILE` - artifact locations
@@ -123,11 +130,21 @@ The project uses a dotenv-based configuration file. See `.env.example` for the f
 
 ## Project structure
 ```text
-server/              # FastAPI backend and prediction endpoint
-scripts/             # Training pipeline and artifact generation
-src/                 # React + TypeScript frontend
-assets/              # Model artifacts and downloaded dataset
-public/              # Static files and exported metrics
+server/
+  app.py             # FastAPI routes and wiring only
+  artifacts.py        # Loads the trained model + real reference tables
+  valuation.py         # Prediction, confidence, and explanation logic
+  schemas.py           # Request/response models
+scripts/
+  train_model.py       # Downloads real data, trains the model, writes all artifacts
+src/
+  components/ui/       # shadcn/ui primitives
+  components/dashboard/ # PredictionForm, PredictionResultCard, CompareView, ModelInsights
+  lib/                  # predictionEngine.ts (API client) and modelMetrics.ts
+  pages/                # Route-level pages
+assets/                # Downloaded dataset + trained model artifacts (gitignored, regenerated)
+public/
+  data/                 # Generated model-metrics/feature-importance/etc. JSON (gitignored)
 ```
 
 ## Verification
