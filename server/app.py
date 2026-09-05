@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
@@ -33,124 +34,133 @@ def _resolve_artifact_path(env_name: str, default: Path) -> Path:
 MODEL_PATH = _resolve_artifact_path("MODEL_FILE", OUTPUT_DIR_PATH / "random_forest_model.pkl")
 METRICS_PATH = _resolve_artifact_path("METRICS_FILE", OUTPUT_DIR_PATH / "model_metrics.json")
 FEATURES_PATH = _resolve_artifact_path("FEATURES_FILE", OUTPUT_DIR_PATH / "feature_columns.json")
+FEATURE_IMPORTANCE_PATH = OUTPUT_DIR_PATH / "feature_importance.json"
+CORRELATION_PATH = OUTPUT_DIR_PATH / "correlation_matrix.json"
+TRAINING_HISTORY_PATH = OUTPUT_DIR_PATH / "training_history.json"
+PROPERTY_TYPE_DEFAULTS_PATH = OUTPUT_DIR_PATH / "property_type_defaults.json"
+METRO_PRICE_INDEX_PATH = OUTPUT_DIR_PATH / "metro_price_index.json"
 
-app = FastAPI(title="EstateMind API", version="1.0.0")
+app = FastAPI(title="EstateMind API", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class PredictionRequest(BaseModel):
     sqft: int
     bedrooms: int
+    bathrooms: float
     city: str
     ageYears: int
     propertyType: str
 
 
-class PredictionResponse(dict):
-    pass
+def _load_json(path: Path) -> Any:
+    if not path.exists():
+        raise FileNotFoundError(f"Required artifact not found at {path}. Run `npm run train:model` first.")
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
-def _load_artifacts() -> tuple[Any, dict[str, Any], list[str]]:
+def _load_artifacts() -> dict[str, Any]:
     if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
-    if not METRICS_PATH.exists():
-        raise FileNotFoundError(f"Metrics file not found at {METRICS_PATH}")
-    if not FEATURES_PATH.exists():
-        raise FileNotFoundError(f"Features file not found at {FEATURES_PATH}")
-
+        raise FileNotFoundError(f"Model file not found at {MODEL_PATH}. Run `npm run train:model` first.")
     with MODEL_PATH.open("rb") as handle:
         model = pickle.load(handle)
-    with METRICS_PATH.open("r", encoding="utf-8") as handle:
-        metrics = json.load(handle)
-    with FEATURES_PATH.open("r", encoding="utf-8") as handle:
-        feature_columns = json.load(handle)
-    return model, metrics, feature_columns
+
+    return {
+        "model": model,
+        "metrics": _load_json(METRICS_PATH),
+        "feature_columns": _load_json(FEATURES_PATH),
+        "feature_importance": _load_json(FEATURE_IMPORTANCE_PATH),
+        "correlation_matrix": _load_json(CORRELATION_PATH),
+        "training_history": _load_json(TRAINING_HISTORY_PATH),
+        "property_type_defaults": _load_json(PROPERTY_TYPE_DEFAULTS_PATH),
+        "metro_price_index": _load_json(METRO_PRICE_INDEX_PATH),
+    }
 
 
-MODEL, MODEL_METRICS, FEATURE_COLUMNS = _load_artifacts()
-
-
-CITY_MULTIPLIERS = {
-    "san-francisco": 1.55,
-    "new-york": 1.47,
-    "los-angeles": 1.33,
-    "seattle": 1.24,
-    "boston": 1.2,
-    "miami": 1.08,
-    "austin": 1.0,
-    "chicago": 0.95,
-    "denver": 1.02,
-    "atlanta": 0.9,
-    "dallas": 0.91,
-    "phoenix": 0.88,
-}
+ARTIFACTS = _load_artifacts()
+MODEL = ARTIFACTS["model"]
+MODEL_METRICS = ARTIFACTS["metrics"]
+FEATURE_COLUMNS: list[str] = ARTIFACTS["feature_columns"]
+PROPERTY_TYPES = ["studio", "apartment", "house", "villa"]
 
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def _build_features(request: PredictionRequest) -> pd.DataFrame:
-    sqft = _clamp(float(request.sqft), 500.0, 6000.0)
-    bedrooms = int(_clamp(float(request.bedrooms), 1.0, 6.0))
-    age_years = int(_clamp(float(request.ageYears), 0.0, 80.0))
-
-    city_key = request.city.lower().replace(" ", "-")
-    city_val = CITY_MULTIPLIERS.get(city_key, 1.0)
-    property_type = {"studio": 0, "apartment": 1, "house": 2, "villa": 3}.get(request.propertyType.lower(), 1)
-
-    lot_size = max(1200, int(round(sqft * 0.85 + bedrooms * 900)))
-    school_rating = _clamp(3.5 + city_val * 1.2 + bedrooms * 0.25, 3.0, 10.0)
-    crime_index = _clamp(4.2 + city_val * 0.8 + age_years * 0.02, 1.0, 10.0)
-
-    frame = pd.DataFrame(
-        [{
-            "sqft": int(sqft),
-            "beds": int(bedrooms),
-            "age": int(age_years),
-            "city_val": float(city_val),
-            "property_type": int(property_type),
-            "lot_size": int(lot_size),
-            "school_rating": float(school_rating),
-            "crime_index": float(crime_index),
-        }]
-    )
-    return frame[FEATURE_COLUMNS]
+def _resolve_metro(city: str) -> dict[str, Any]:
+    key = city.lower().replace(" ", "-")
+    metro = ARTIFACTS["metro_price_index"]["cities"].get(key)
+    if metro is None:
+        metro = ARTIFACTS["metro_price_index"]["cities"][ARTIFACTS["metro_price_index"]["trainingMetro"].split(",")[0].lower().replace(" ", "-")]
+    return metro
 
 
-def _tier_for_price(price: float) -> str:
-    if price < 450000:
-        return "Budget"
-    if price < 850000:
-        return "Mid-Range"
-    return "Luxury"
+def _build_feature_row(request: PredictionRequest) -> pd.DataFrame:
+    sqft = _clamp(float(request.sqft), 500.0, 8000.0)
+    bedrooms = int(_clamp(float(request.bedrooms), 0.0, 10.0))
+    bathrooms = _clamp(float(request.bathrooms), 0.5, 8.0)
+    age_years = int(_clamp(float(request.ageYears), 0.0, 115.0))
 
+    property_type = request.propertyType.lower()
+    if property_type not in PROPERTY_TYPES:
+        property_type = "house"
+    defaults = ARTIFACTS["property_type_defaults"][property_type]
 
-def _build_factor_breakdown(request: PredictionRequest) -> dict[str, int]:
-    sqft = _clamp(float(request.sqft), 500.0, 6000.0)
-    bedrooms = int(_clamp(float(request.bedrooms), 1.0, 6.0))
-    age_years = int(_clamp(float(request.ageYears), 0.0, 80.0))
-    city_key = request.city.lower().replace(" ", "-")
-    city_val = CITY_MULTIPLIERS.get(city_key, 1.0)
-    property_type = {"studio": 0, "apartment": 1, "house": 2, "villa": 3}.get(request.propertyType.lower(), 1)
-
-    location_score = int(round(_clamp(18 + city_val * 10 + (2 if city_val >= 1.2 else 0), 12, 36)))
-    size_score = int(round(_clamp(16 + (sqft / 6000.0) * 22 + bedrooms * 0.8, 10, 35)))
-    bedroom_score = int(round(_clamp(10 + bedrooms * 3.5, 8, 28)))
-    age_score = int(round(_clamp(12 + max(0, 35 - age_years) * 0.45, 8, 30)))
-    type_score = int(round(_clamp(10 + property_type * 5, 8, 24)))
-
-    scores = {
-        "location": location_score,
-        "size": size_score,
-        "bedrooms": bedroom_score,
-        "age": age_score,
-        "type": type_score,
+    row = {
+        "sqft_living": sqft,
+        "bedrooms": bedrooms,
+        "bathrooms": bathrooms,
+        "floors": defaults["floors"],
+        "waterfront": defaults["waterfront"],
+        "view": defaults["view"],
+        "condition": defaults["condition"],
+        "grade": defaults["grade"],
+        "age": age_years,
+        "was_renovated": defaults["wasRenovated"],
+        # No address is collected, so we assume a typical location within the
+        # chosen metro (index of 1.0 = average zip). Cross-metro differences
+        # are handled separately via the real, cited Zillow ratio.
+        "zip_price_index": 1.0,
+        "property_type": PROPERTY_TYPES.index(property_type),
     }
-    total = sum(scores.values())
-    normalized = {name: int(round(value * 100 / total)) for name, value in scores.items()}
-    diff = 100 - sum(normalized.values())
-    normalized["location"] += diff
-    return normalized
+    return pd.DataFrame([row])[FEATURE_COLUMNS]
+
+
+def _tree_ensemble_predictions(features: pd.DataFrame) -> np.ndarray:
+    return np.array([tree.predict(features)[0] for tree in MODEL.estimators_])
+
+
+def _tree_interpreter_contributions(features: pd.DataFrame) -> tuple[float, np.ndarray]:
+    """Real per-prediction feature attribution, decomposed from the actual
+    decision paths taken through every tree in the forest (the same
+    algorithm the `treeinterpreter` package uses). No hand-written weighting
+    - the split points and leaf values come entirely from training."""
+    x = features.to_numpy()
+    n_features = x.shape[1]
+    contributions = np.zeros(n_features)
+    bias_total = 0.0
+
+    for estimator in MODEL.estimators_:
+        tree = estimator.tree_
+        node_indicator = estimator.decision_path(x)
+        node_index = node_indicator.indices[node_indicator.indptr[0]: node_indicator.indptr[1]]
+        values = tree.value[:, 0, 0]
+
+        bias_total += values[node_index[0]]
+        for i in range(1, len(node_index)):
+            parent = node_index[i - 1]
+            feature_idx = tree.feature[parent]
+            contributions[feature_idx] += values[node_index[i]] - values[parent]
+
+    n = len(MODEL.estimators_)
+    return bias_total / n, contributions / n
 
 
 @app.get("/health")
@@ -163,32 +173,91 @@ def model_metrics() -> dict[str, Any]:
     return MODEL_METRICS
 
 
+@app.get("/api/model-insights")
+def model_insights() -> dict[str, Any]:
+    return {
+        "featureImportance": ARTIFACTS["feature_importance"],
+        "correlationMatrix": ARTIFACTS["correlation_matrix"],
+        "trainingHistory": ARTIFACTS["training_history"],
+        "metroPriceIndex": ARTIFACTS["metro_price_index"],
+        "modelMetrics": MODEL_METRICS,
+    }
+
+
 @app.post("/api/predict", response_model=dict[str, Any])
 def predict(request: PredictionRequest) -> dict[str, Any]:
     try:
-        features = _build_features(request)
-        prediction = float(MODEL.predict(features)[0])
+        features = _build_feature_row(request)
+        training_metro_price = float(MODEL.predict(features)[0])
+        tree_preds = _tree_ensemble_predictions(features)
+        bias, contributions = _tree_interpreter_contributions(features)
     except Exception as exc:  # pragma: no cover - defensive path
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    price = int(round(prediction))
-    price_per_sqft = max(120, int(round(price / max(_clamp(float(request.sqft), 500.0, 6000.0), 1))))
-    market_avg_per_sqft = int(round(price_per_sqft * 1.14))
-    tier_score = _clamp(min(100.0, max(0.0, (price / 100000.0) * 14.5)), 0.0, 100.0)
-    tier = _tier_for_price(price)
-    confidence = _clamp(93.5 - max(0, int(_clamp(float(request.ageYears), 0.0, 80.0)) - 35) * 0.2 - max(0, int(_clamp(float(request.sqft), 500.0, 6000.0)) - 5000) * 0.001, 70.0, 97.0)
-    spread = (1 - confidence / 100) * 1.25
-    low = int(round(price * (1 - spread)))
-    high = int(round(price * (1 + spread)))
+    metro = _resolve_metro(request.city)
+    scale = metro["scaleVsTrainingMetro"]
+
+    price = int(round(training_metro_price * scale))
+    sqft = _clamp(float(request.sqft), 500.0, 8000.0)
+    price_per_sqft = max(1, int(round(price / sqft)))
+    market_avg_per_sqft = int(round((metro["zhviLatest"] / MODEL_METRICS["trainingMedianSqft"])))
+
+    # Real, empirical prediction interval: the spread of the 250 individual
+    # trees' predictions for this exact input, not a fabricated formula.
+    low_raw, high_raw = np.percentile(tree_preds, [10, 90])
+    range_low = int(round(low_raw * scale))
+    range_high = int(round(high_raw * scale))
+    spread_ratio = (tree_preds.std() / max(tree_preds.mean(), 1.0))
+    confidence = round(_clamp(100 * (1 - spread_ratio), 45.0, 97.0), 1)
+
+    metro_reference_price = metro["zhviLatest"]
+    ratio_to_metro = price / metro_reference_price
+    tier_score = round(_clamp(ratio_to_metro * 50, 0.0, 100.0), 1)
+    tier = "Budget" if ratio_to_metro < 0.7 else "Luxury" if ratio_to_metro >= 1.4 else "Mid-Range"
+
+    label_lookup = {
+        "sqft_living": "Square Footage",
+        "bedrooms": "Bedrooms",
+        "bathrooms": "Bathrooms",
+        "floors": "Floors",
+        "waterfront": "Waterfront",
+        "view": "View Quality",
+        "condition": "Condition",
+        "grade": "Construction Grade",
+        "age": "Property Age",
+        "was_renovated": "Renovated",
+        "zip_price_index": "Location (within metro)",
+        "property_type": "Property Type",
+    }
+
+    factor_rows = []
+    scaled_contributions = contributions * scale
+    total_abs = float(np.sum(np.abs(scaled_contributions))) or 1.0
+    for col, contribution in zip(FEATURE_COLUMNS, scaled_contributions):
+        factor_rows.append({
+            "feature": col,
+            "label": label_lookup.get(col, col),
+            "contribution": round(float(contribution), 2),
+            "share": round(float(abs(contribution) / total_abs), 4),
+        })
+    factor_rows.sort(key=lambda row: abs(row["contribution"]), reverse=True)
 
     return {
         "price": price,
+        "trainingMetroPrice": int(round(training_metro_price)),
         "pricePerSqft": price_per_sqft,
         "marketAvgPerSqft": market_avg_per_sqft,
         "tier": tier,
-        "tierScore": round(tier_score, 1),
-        "confidence": round(confidence, 1),
-        "factors": _build_factor_breakdown(request),
-        "range": {"low": low, "high": high},
+        "tierScore": tier_score,
+        "confidence": confidence,
+        "factors": factor_rows[:6],
+        "range": {"low": range_low, "high": range_high},
+        "metro": {
+            "city": request.city,
+            "metro": metro["metro"],
+            "scaleVsTrainingMetro": scale,
+            "source": ARTIFACTS["metro_price_index"]["source"],
+            "asOf": ARTIFACTS["metro_price_index"]["latestDate"],
+        },
         "modelMetrics": MODEL_METRICS,
     }
