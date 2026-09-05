@@ -124,11 +124,16 @@ def predict_price(artifacts: dict[str, Any], request: PredictionRequest) -> dict
     # tertiles of actual sales, Budget/Mid-Range/Luxury each cover a real
     # (roughly equal) third of the market instead of almost everything
     # landing in one bucket.
+    # Compare the metro-scaled dollar price directly against the unscaled
+    # training-set price distribution: scaling both sides by the same metro
+    # factor would cancel out and make the tier city-invariant, which is not
+    # what we want - a $950k house should rank very differently in Chicago
+    # than in San Francisco.
     percentile_curve = artifacts["price_percentiles"]
-    scaled_prices = [p * scale for p in percentile_curve["prices"]]
-    tier_score = round(_clamp(float(np.interp(price, scaled_prices, percentile_curve["percentiles"])), 0.0, 100.0), 1)
-    budget_cutoff = scaled_prices[33]
-    luxury_cutoff = scaled_prices[67]
+    curve_prices = percentile_curve["prices"]
+    tier_score = round(_clamp(float(np.interp(price, curve_prices, percentile_curve["percentiles"])), 0.0, 100.0), 1)
+    budget_cutoff = curve_prices[33]
+    luxury_cutoff = curve_prices[67]
     tier = "Budget" if price < budget_cutoff else "Luxury" if price >= luxury_cutoff else "Mid-Range"
 
     scaled_contributions = contributions * scale

@@ -151,37 +151,51 @@ export function PredictionResultCard({ result, input, onSave, isSaved }: Predict
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             <div>
               <div className="text-sm font-medium mb-1">Tier Score</div>
-              <div className="relative h-[104px]">
-                <ResponsiveContainer width="100%" height={160}>
+              <div className="relative h-[190px] overflow-hidden">
+                <ResponsiveContainer width="100%" height={190}>
                   <RadialBarChart
                     cx="50%"
-                    cy="92%"
+                    cy="88%"
                     startAngle={180}
                     endAngle={0}
-                    innerRadius="140%"
+                    innerRadius="145%"
                     outerRadius="220%"
-                    barSize={12}
+                    barSize={20}
                     data={gaugeData}
                   >
                     <PolarAngleAxis type="number" domain={[0, 100]} tick={false} />
                     <RadialBar
                       dataKey="value"
-                      cornerRadius={6}
+                      cornerRadius={10}
                       background={{ fill: "hsl(var(--secondary))" }}
                     />
                   </RadialBarChart>
                 </ResponsiveContainer>
-                <div className="absolute inset-x-0 bottom-1 text-center">
-                  <div className="text-2xl font-bold font-mono" style={{ color: tierColor }}>
+                <div className="absolute inset-x-0 bottom-2 text-center">
+                  <div className="text-4xl font-bold font-mono" style={{ color: tierColor }}>
                     {result.tierScore.toFixed(0)}
                   </div>
                   <div className="text-[11px] text-muted-foreground">tier score / 100</div>
                 </div>
               </div>
-              <div className="flex items-center justify-between text-[11px] text-muted-foreground px-1 -mt-2">
-                <span>Budget</span>
-                <span>Mid-Range</span>
-                <span>Luxury</span>
+              <div className="flex items-center justify-between text-xs px-1 -mt-2">
+                {(["Budget", "Mid-Range", "Luxury"] as const).map((label) => (
+                  <span
+                    key={label}
+                    className={
+                      result.tier === label
+                        ? "font-semibold"
+                        : "text-muted-foreground"
+                    }
+                    style={result.tier === label ? { color: tierColor } : undefined}
+                  >
+                    {label}
+                  </span>
+                ))}
+              </div>
+              <div className="text-[11px] text-muted-foreground mt-1.5 text-center">
+                Priced higher than <span className="font-medium text-foreground">{result.tierScore.toFixed(0)}%</span> of
+                comparable real home sales.
               </div>
             </div>
 
