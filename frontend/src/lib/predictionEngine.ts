@@ -42,7 +42,7 @@ export interface PredictionResult {
 // Display metadata only (labels/regions for the dropdown) - no pricing
 // numbers live here. Real per-metro pricing comes from the backend's
 // metro_price_index.json, which is derived from Zillow's public ZHVI data
-// at training time (see scripts/train_model.py).
+// at training time (see backend/scripts/train_model.py).
 export const CITIES: Record<string, { label: string; region: string }> = {
   "san-francisco": { label: "San Francisco", region: "West Coast" },
   "new-york": { label: "New York", region: "East Coast" },
@@ -56,6 +56,15 @@ export const CITIES: Record<string, { label: string; region: string }> = {
   "atlanta": { label: "Atlanta", region: "South" },
   "dallas": { label: "Dallas", region: "South" },
   "phoenix": { label: "Phoenix", region: "Southwest" },
+};
+
+// Shared property-type display labels, so the form, the result card, and
+// the comparison view all describe the same value the same way.
+export const PROPERTY_TYPE_LABELS: Record<PropertyType, string> = {
+  studio: "Studio",
+  apartment: "Apartment",
+  house: "House",
+  villa: "Villa",
 };
 
 const PROPERTY_TYPE_MULT: Record<PropertyType, number> = {
@@ -76,18 +85,14 @@ export function getTierFromScore(score: number): PredictionResult["tier"] {
   return "Luxury";
 }
 
-export function getGaugeAngle(score: number): number {
-  const normalizedScore = clamp(score, 0, 100);
-  return -90 + (normalizedScore / 100) * 180;
-}
-
 export function normalizeInput(input: PredictionInput): PredictionInput {
   return {
     ...input,
-    sqft: clamp(input.sqft, 500, 8000),
-    bedrooms: clamp(input.bedrooms, 0, 10),
-    bathrooms: clamp(input.bathrooms, 0.5, 8),
-    ageYears: clamp(input.ageYears, 0, 115),
+    sqft: Math.round(clamp(input.sqft, 500, 8000)),
+    bedrooms: Math.round(clamp(input.bedrooms, 0, 10)),
+    // Whole bathrooms only - see PredictionForm.tsx and backend/schemas.py.
+    bathrooms: Math.round(clamp(input.bathrooms, 1, 8)),
+    ageYears: Math.round(clamp(input.ageYears, 0, 115)),
   };
 }
 
@@ -97,7 +102,7 @@ let cachedMetroIndex: Record<string, { zhviLatest: number; scaleVsTrainingMetro:
  * Offline fallback only: used when the FastAPI backend cannot be reached.
  * It reuses the same real, cited Zillow metro index the backend trains
  * with (fetched from the static /data/metro-price-index.json snapshot
- * written by scripts/train_model.py) so even the fallback numbers are
+ * written by backend/scripts/train_model.py) so even the fallback numbers are
  * anchored to real published data rather than an invented per-city
  * multiplier. If that snapshot itself can't be loaded, this throws rather
  * than silently guessing - callers must treat total failure as "no
@@ -226,7 +231,7 @@ export interface ModelInsights {
 
 /** Real model internals (feature importances, correlation matrix, learning
  * curve, cited metro index) computed once at training time by
- * scripts/train_model.py and served by the backend - nothing here is
+ * backend/scripts/train_model.py and served by the backend - nothing here is
  * hardcoded in the frontend. */
 export async function fetchModelInsights(): Promise<ModelInsights> {
   const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");

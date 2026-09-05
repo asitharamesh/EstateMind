@@ -7,8 +7,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from server.artifacts import FEATURE_LABELS, PROPERTY_TYPES
-from server.schemas import PredictionRequest
+from backend.artifacts import FEATURE_LABELS, PROPERTY_TYPES
+from backend.schemas import PredictionRequest
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -28,7 +28,7 @@ def _resolve_metro(artifacts: dict[str, Any], city: str) -> dict[str, Any]:
 def _build_feature_row(artifacts: dict[str, Any], request: PredictionRequest) -> pd.DataFrame:
     sqft = _clamp(float(request.sqft), 500.0, 8000.0)
     bedrooms = int(_clamp(float(request.bedrooms), 0.0, 10.0))
-    bathrooms = _clamp(float(request.bathrooms), 0.5, 8.0)
+    bathrooms = int(_clamp(float(request.bathrooms), 1.0, 8.0))
     age_years = int(_clamp(float(request.ageYears), 0.0, 115.0))
 
     property_type = request.propertyType.lower()
@@ -57,7 +57,12 @@ def _build_feature_row(artifacts: dict[str, Any], request: PredictionRequest) ->
 
 
 def _tree_ensemble_predictions(model: Any, features: pd.DataFrame) -> np.ndarray:
-    return np.array([tree.predict(features)[0] for tree in model.estimators_])
+    # Predict on the raw array, not the DataFrame: each sub-estimator was
+    # never fit with column names of its own (only the top-level ensemble
+    # tracks those), so handing it a DataFrame triggers a sklearn
+    # "fitted without feature names" warning on every one of the 250 trees.
+    x = features.to_numpy()
+    return np.array([tree.predict(x)[0] for tree in model.estimators_])
 
 
 def _tree_interpreter_contributions(model: Any, features: pd.DataFrame) -> tuple[float, np.ndarray]:
@@ -112,9 +117,19 @@ def predict_price(artifacts: dict[str, Any], request: PredictionRequest) -> dict
     spread_ratio = tree_preds.std() / max(tree_preds.mean(), 1.0)
     confidence = round(_clamp(100 * (1 - spread_ratio), 45.0, 97.0), 1)
 
-    ratio_to_metro = price / metro["zhviLatest"]
-    tier_score = round(_clamp(ratio_to_metro * 50, 0.0, 100.0), 1)
-    tier = "Budget" if ratio_to_metro < 0.7 else "Luxury" if ratio_to_metro >= 1.4 else "Mid-Range"
+    # Tier score: this property's percentile rank against the real
+    # distribution of training-set sale prices (scaled to the chosen metro
+    # the same way the price itself is), not an arbitrary multiplier against
+    # a single metro-average figure. Because the cutoffs are genuine
+    # tertiles of actual sales, Budget/Mid-Range/Luxury each cover a real
+    # (roughly equal) third of the market instead of almost everything
+    # landing in one bucket.
+    percentile_curve = artifacts["price_percentiles"]
+    scaled_prices = [p * scale for p in percentile_curve["prices"]]
+    tier_score = round(_clamp(float(np.interp(price, scaled_prices, percentile_curve["percentiles"])), 0.0, 100.0), 1)
+    budget_cutoff = scaled_prices[33]
+    luxury_cutoff = scaled_prices[67]
+    tier = "Budget" if price < budget_cutoff else "Luxury" if price >= luxury_cutoff else "Mid-Range"
 
     scaled_contributions = contributions * scale
     total_abs = float(np.sum(np.abs(scaled_contributions))) or 1.0

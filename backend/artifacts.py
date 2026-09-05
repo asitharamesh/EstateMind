@@ -1,5 +1,5 @@
-"""Loads the artifacts scripts/train_model.py writes: the trained model
-plus every real, data-derived reference table the API needs (metrics,
+"""Loads the artifacts backend/scripts/train_model.py writes: the trained
+model plus every real, data-derived reference table the API needs (metrics,
 feature importances, correlation matrix, training curve, per-property-type
 defaults, and the cited cross-metro price index). Nothing here is
 hand-typed - if an artifact is missing, this fails loudly and tells you to
@@ -11,9 +11,9 @@ import pickle
 from pathlib import Path
 from typing import Any
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BACKEND_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "assets"))
-OUTPUT_DIR_PATH = OUTPUT_DIR if OUTPUT_DIR.is_absolute() else BASE_DIR / OUTPUT_DIR
+OUTPUT_DIR_PATH = OUTPUT_DIR if OUTPUT_DIR.is_absolute() else BACKEND_DIR / OUTPUT_DIR
 
 PROPERTY_TYPES = ["studio", "apartment", "house", "villa"]
 
@@ -42,7 +42,7 @@ def _resolve_artifact_path(env_name: str, default: Path) -> Path:
     if candidate.is_absolute():
         return candidate
     if "/" in raw_value or "\\" in raw_value:
-        return BASE_DIR / candidate
+        return BACKEND_DIR / candidate
     return OUTPUT_DIR_PATH / candidate
 
 
@@ -54,6 +54,7 @@ CORRELATION_PATH = OUTPUT_DIR_PATH / "correlation_matrix.json"
 TRAINING_HISTORY_PATH = OUTPUT_DIR_PATH / "training_history.json"
 PROPERTY_TYPE_DEFAULTS_PATH = OUTPUT_DIR_PATH / "property_type_defaults.json"
 METRO_PRICE_INDEX_PATH = OUTPUT_DIR_PATH / "metro_price_index.json"
+PRICE_PERCENTILES_PATH = OUTPUT_DIR_PATH / "price_percentiles.json"
 
 
 def _load_json(path: Path) -> Any:
@@ -78,4 +79,5 @@ def load_artifacts() -> dict[str, Any]:
         "training_history": _load_json(TRAINING_HISTORY_PATH),
         "property_type_defaults": _load_json(PROPERTY_TYPE_DEFAULTS_PATH),
         "metro_price_index": _load_json(METRO_PRICE_INDEX_PATH),
+        "price_percentiles": _load_json(PRICE_PERCENTILES_PATH),
     }

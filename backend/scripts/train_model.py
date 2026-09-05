@@ -32,19 +32,38 @@ from sklearn.model_selection import train_test_split
 
 load_dotenv()
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+# This script lives at backend/scripts/train_model.py, so its artifacts
+# belong under backend/ and the generated frontend-served snapshots belong
+# under frontend/public - both computed explicitly from the repo root
+# rather than assumed from a fixed parents[] depth.
+SCRIPT_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = SCRIPT_DIR.parent
+REPO_ROOT = BACKEND_DIR.parent
+FRONTEND_DIR = REPO_ROOT / "frontend"
+
+
+def _resolve_dir(env_name: str, default: Path, base: Path) -> Path:
+    """A relative override is anchored at `base` (not the process's CWD),
+    so e.g. OUTPUT_DIR=assets means the same thing here as it does in
+    backend/artifacts.py regardless of where the script is invoked from."""
+    raw = os.getenv(env_name)
+    if not raw:
+        return default
+    candidate = Path(raw)
+    return candidate if candidate.is_absolute() else base / candidate
+
 
 DATASET_URL = os.getenv(
     "DATASET_URL",
     "https://raw.githubusercontent.com/karan-shah/usa-housing-dataset/master/kc_house_data.csv",
 )
-DATASET_PATH = Path(os.getenv("DATASET_PATH", BASE_DIR / "assets" / "kc_house_data.csv"))
+DATASET_PATH = _resolve_dir("DATASET_PATH", BACKEND_DIR / "assets" / "kc_house_data.csv", BACKEND_DIR)
 METRO_INDEX_URL = os.getenv(
     "METRO_INDEX_URL",
     "https://files.zillowstatic.com/research/public_csvs/zhvi/Metro_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv",
 )
 
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", BASE_DIR / "assets"))
+OUTPUT_DIR = _resolve_dir("OUTPUT_DIR", BACKEND_DIR / "assets", BACKEND_DIR)
 MODEL_PATH = OUTPUT_DIR / os.getenv("MODEL_FILE", "random_forest_model.pkl")
 METRICS_PATH = OUTPUT_DIR / os.getenv("METRICS_FILE", "model_metrics.json")
 FEATURES_PATH = OUTPUT_DIR / os.getenv("FEATURES_FILE", "feature_columns.json")
@@ -54,8 +73,9 @@ TRAINING_HISTORY_PATH = OUTPUT_DIR / "training_history.json"
 PROPERTY_TYPE_DEFAULTS_PATH = OUTPUT_DIR / "property_type_defaults.json"
 ZIP_PRICE_INDEX_PATH = OUTPUT_DIR / "zip_price_index.json"
 METRO_PRICE_INDEX_PATH = OUTPUT_DIR / "metro_price_index.json"
+PRICE_PERCENTILES_PATH = OUTPUT_DIR / "price_percentiles.json"
 
-PUBLIC_DIR = Path(os.getenv("PUBLIC_DIR", BASE_DIR / "public"))
+PUBLIC_DIR = _resolve_dir("PUBLIC_DIR", FRONTEND_DIR / "public", REPO_ROOT)
 
 # City keys the product exposes, mapped to the exact metro names used in
 # Zillow's ZHVI file. Seattle is the reference metro because that's what the
@@ -132,11 +152,30 @@ def classify_property_type(sqft_living: float, floors: float, grade: int, bedroo
     return "house"
 
 
+def drop_impossible_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove rows that are physically impossible, not just unusual.
+
+    This dataset has one well-documented data-entry error: a single sale
+    (id 2402100895) recorded with 33 bedrooms in only 1,620 sqft of living
+    space - about 49 sqft per bedroom, far below the smallest legally
+    habitable room. Every other multi-bedroom row in the data (including
+    the next-highest, 11 bedrooms in 3,000 sqft) is physically plausible.
+    This is almost certainly a fat-fingered "3" and is dropped rather than
+    clipped, so it can't distort the bedrooms<->price relationship the
+    model learns. No other feature in this dataset showed a comparable
+    impossibility on inspection (see the dataset-audit notes in README.md).
+    """
+    MIN_SQFT_PER_BEDROOM = 120  # smallest plausible single room, generously rounded down
+    impossible = (df["bedrooms"] > 0) & (df["sqft_living"] / df["bedrooms"] < MIN_SQFT_PER_BEDROOM)
+    return df[~impossible]
+
+
 def build_training_frame(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw.dropna(subset=[
         "price", "bedrooms", "bathrooms", "sqft_living", "floors", "waterfront",
         "view", "condition", "grade", "yr_built", "yr_renovated", "zipcode", "date",
     ]).copy()
+    df = drop_impossible_rows(df)
 
     sale_date = pd.to_datetime(df["date"], format="%Y%m%dT%H%M%S")
     df["age"] = (sale_date.dt.year - df["yr_built"]).clip(lower=0)
@@ -192,6 +231,18 @@ def compute_training_history(X_train: pd.DataFrame, y_train: pd.Series, step: in
             "oobR2": round(float(model.oob_score_), 4),
         })
     return history
+
+
+def compute_price_percentile_curve(y_train: pd.Series) -> dict:
+    """Real empirical price distribution of the training sales, used to turn
+    a predicted price into a genuine "how does this compare to actual sales"
+    percentile (0-100) and a Budget/Mid-Range/Luxury tier - instead of an
+    arbitrary fixed multiplier and cutoffs. Because these are real tertiles
+    of the training data, each tier covers a real, roughly-equal third of
+    actual sales rather than clustering everything into one bucket."""
+    percentiles = list(range(0, 101))
+    prices = np.percentile(y_train, percentiles).tolist()
+    return {"percentiles": percentiles, "prices": prices}
 
 
 def build_metro_price_index(reference_date: pd.Timestamp) -> dict:
@@ -320,6 +371,7 @@ def main() -> None:
 
     median_sale_date = pd.to_datetime(raw["date"], format="%Y%m%dT%H%M%S").median()
     metro_price_index = build_metro_price_index(median_sale_date)
+    price_percentiles = compute_price_percentile_curve(y_train)
 
     with MODEL_PATH.open("wb") as handle:
         import pickle
@@ -333,6 +385,7 @@ def main() -> None:
     PROPERTY_TYPE_DEFAULTS_PATH.write_text(json.dumps(property_type_defaults, indent=2), encoding="utf-8")
     ZIP_PRICE_INDEX_PATH.write_text(json.dumps({str(k): v for k, v in zip_index.items()}, indent=2), encoding="utf-8")
     METRO_PRICE_INDEX_PATH.write_text(json.dumps(metro_price_index, indent=2), encoding="utf-8")
+    PRICE_PERCENTILES_PATH.write_text(json.dumps(price_percentiles, indent=2), encoding="utf-8")
 
     public_data_dir = PUBLIC_DIR / "data"
     public_data_dir.mkdir(parents=True, exist_ok=True)

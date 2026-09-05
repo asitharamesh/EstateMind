@@ -1,20 +1,24 @@
 """FastAPI wiring: loads the trained model's artifacts once at startup and
-exposes them over HTTP. All ML logic lives in server/valuation.py and
-server/artifacts.py - this file only defines routes.
+exposes them over HTTP. All ML logic lives in backend/valuation.py and
+backend/artifacts.py - this file only defines routes.
 """
 import os
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+
+# Load .env before importing backend.artifacts, since that module reads
+# OUTPUT_DIR/MODEL_FILE/etc. env vars at import time - loading dotenv after
+# the import would silently ignore any of those overrides.
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from server.artifacts import load_artifacts
-from server.schemas import PredictionRequest
-from server.valuation import predict_price
-
-load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+from backend.artifacts import load_artifacts
+from backend.schemas import PredictionRequest
+from backend.valuation import predict_price
 
 app = FastAPI(title="EstateMind API", version="2.0.0")
 app.add_middleware(

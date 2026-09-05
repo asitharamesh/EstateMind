@@ -31,7 +31,7 @@ const Index = () => {
     }
   };
 
-  const handleSave = () => {
+  const handleSave = (label: string) => {
     if (!current) return;
     if (saved.length >= 3) {
       toast.error("You can compare up to 3 properties at once");
@@ -43,6 +43,7 @@ const Index = () => {
     }
     const item: SavedItem = {
       id: crypto.randomUUID(),
+      label,
       input: current.input,
       result: current.result,
     };
@@ -59,14 +60,14 @@ const Index = () => {
   return (
     <div className="min-h-screen relative">
       {/* Top nav */}
-      <header className="sticky top-0 z-40 backdrop-blur-xl bg-background/70 border-b border-border">
+      <header className="sticky top-0 z-40 bg-background/95 backdrop-blur border-b border-border">
         <div className="container mx-auto px-6 h-16 flex items-center">
           <div className="flex items-center gap-3">
-            <div className="h-9 w-9 rounded-xl bg-gradient-primary flex items-center justify-center">
+            <div className="h-9 w-9 rounded-lg bg-primary flex items-center justify-center">
               <Building2 className="h-5 w-5 text-primary-foreground" />
             </div>
             <div className="font-bold text-lg leading-none">
-              Estate<span className="text-gradient">Mind</span>
+              Estate<span className="text-primary">Mind</span>
             </div>
           </div>
         </div>
@@ -75,11 +76,11 @@ const Index = () => {
       {/* Hero */}
       <section className="container mx-auto px-6 pt-12 pb-8 relative">
         <div className="relative max-w-3xl">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/30 text-xs text-primary font-semibold mb-4">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/20 text-xs text-primary font-semibold mb-4">
             Random Forest Regressor · trained on real King County home sales
           </div>
-          <h1 className="text-4xl md:text-5xl font-bold leading-tight">
-            Property price estimates, with the model's <span className="text-gradient">reasoning</span> shown.
+          <h1 className="text-4xl md:text-5xl font-bold leading-tight text-foreground">
+            Property price estimates, with the model's reasoning shown.
           </h1>
           <p className="text-muted-foreground mt-4 text-lg max-w-2xl">
             Enter a property's details to get a price estimate, a confidence range, and which
@@ -93,10 +94,10 @@ const Index = () => {
       <main className="container mx-auto px-6 pb-16">
         <Tabs value={tab} onValueChange={setTab} className="w-full">
           <TabsList className="bg-secondary/50 border border-border p-1 h-auto">
-            <TabsTrigger value="predict" className="data-[state=active]:bg-gradient-primary data-[state=active]:text-primary-foreground gap-2 px-4 py-2">
+            <TabsTrigger value="predict" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground gap-2 px-4 py-2">
               <BarChart3 className="h-4 w-4" /> Prediction
             </TabsTrigger>
-            <TabsTrigger value="compare" className="data-[state=active]:bg-gradient-primary data-[state=active]:text-primary-foreground gap-2 px-4 py-2">
+            <TabsTrigger value="compare" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground gap-2 px-4 py-2">
               <GitCompareArrows className="h-4 w-4" /> Compare
               {saved.length > 0 && (
                 <span className="ml-1 px-1.5 py-0.5 rounded-md bg-background/30 text-[10px] font-mono">
@@ -104,7 +105,7 @@ const Index = () => {
                 </span>
               )}
             </TabsTrigger>
-            <TabsTrigger value="model" className="data-[state=active]:bg-gradient-primary data-[state=active]:text-primary-foreground gap-2 px-4 py-2">
+            <TabsTrigger value="model" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground gap-2 px-4 py-2">
               <Brain className="h-4 w-4" /> Model Insights
             </TabsTrigger>
           </TabsList>
@@ -121,8 +122,8 @@ const Index = () => {
                     isSaved={isSaved}
                   />
                 ) : (
-                  <div className="glass rounded-2xl p-12 text-center shadow-card h-full flex flex-col items-center justify-center min-h-[400px]">
-                    <div className="h-16 w-16 rounded-2xl bg-gradient-primary/20 border border-primary/30 flex items-center justify-center mb-4">
+                  <div className="bg-card border border-border rounded-2xl p-12 text-center shadow-card h-full flex flex-col items-center justify-center min-h-[400px]">
+                    <div className="h-16 w-16 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center mb-4">
                       <BarChart3 className="h-8 w-8 text-primary" />
                     </div>
                     <h3 className="text-xl font-semibold mb-2">Ready to predict</h3>
