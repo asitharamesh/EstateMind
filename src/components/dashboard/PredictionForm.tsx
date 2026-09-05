@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { Home, Loader2, Sparkles } from "lucide-react";
+import { ArrowRight, Home, Loader2 } from "lucide-react";
 import { CITIES, type PredictionInput, type PropertyType } from "@/lib/predictionEngine";
 
 interface PredictionFormProps {
@@ -146,7 +146,7 @@ export function PredictionForm({ onPredict, loading }: PredictionFormProps) {
           <Button
             type="submit"
             disabled={loading}
-            className="w-full bg-gradient-primary text-primary-foreground shadow-glow hover:opacity-90"
+            className="w-full bg-gradient-primary text-primary-foreground hover:opacity-90"
             size="lg"
           >
             {loading ? (
@@ -155,7 +155,7 @@ export function PredictionForm({ onPredict, loading }: PredictionFormProps) {
               </>
             ) : (
               <>
-                <Sparkles className="h-4 w-4" /> Predict Price
+                Predict Price <ArrowRight className="h-4 w-4" />
               </>
             )}
           </Button>

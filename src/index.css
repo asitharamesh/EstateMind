@@ -65,7 +65,7 @@
 
     /* Shadows */
     --shadow-elegant: 0 20px 60px -20px hsl(158 78% 30% / 0.45);
-    --shadow-glow: 0 0 40px hsl(158 90% 65% / 0.35);
+    --shadow-glow: 0 0 16px hsl(158 90% 65% / 0.4);
     --shadow-card: 0 8px 30px -10px hsl(222 80% 2% / 0.6);
 
     --transition-smooth: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
@@ -140,18 +140,6 @@
   .bg-gradient-surface { background: var(--gradient-surface); }
 
   .transition-smooth { transition: var(--transition-smooth); }
-
-  .grid-pattern {
-    background-image:
-      linear-gradient(hsl(var(--border) / 0.4) 1px, transparent 1px),
-      linear-gradient(90deg, hsl(var(--border) / 0.4) 1px, transparent 1px);
-    background-size: 40px 40px;
-  }
-}
-
-@keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 20px hsl(var(--primary) / 0.3); }
-  50% { box-shadow: 0 0 40px hsl(var(--primary) / 0.6); }
 }
 
 @keyframes slide-up {
@@ -164,6 +152,5 @@
   to { opacity: 1; }
 }
 
-.animate-pulse-glow { animation: pulse-glow 2.5s ease-in-out infinite; }
 .animate-slide-up { animation: slide-up 0.5s cubic-bezier(0.4, 0, 0.2, 1) both; }
 .animate-fade-in { animation: fade-in 0.6s ease-out both; }

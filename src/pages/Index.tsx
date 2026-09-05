@@ -60,46 +60,31 @@ const Index = () => {
     <div className="min-h-screen relative">
       {/* Top nav */}
       <header className="sticky top-0 z-40 backdrop-blur-xl bg-background/70 border-b border-border">
-        <div className="container mx-auto px-6 h-16 flex items-center justify-between">
+        <div className="container mx-auto px-6 h-16 flex items-center">
           <div className="flex items-center gap-3">
-            <div className="h-9 w-9 rounded-xl bg-gradient-primary flex items-center justify-center shadow-glow">
+            <div className="h-9 w-9 rounded-xl bg-gradient-primary flex items-center justify-center">
               <Building2 className="h-5 w-5 text-primary-foreground" />
             </div>
-            <div>
-              <div className="font-bold text-lg leading-none">
-                Estate<span className="text-gradient">Mind</span>
-              </div>
-              <div className="text-[10px] uppercase tracking-widest text-muted-foreground mt-0.5">
-                AI Property Intelligence
-              </div>
+            <div className="font-bold text-lg leading-none">
+              Estate<span className="text-gradient">Mind</span>
             </div>
           </div>
-
-          <nav className="hidden md:flex items-center gap-6 text-sm text-muted-foreground">
-            <span className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-primary animate-pulse-glow" />
-              Model live · v2.4
-            </span>
-            <span className="font-mono">Live model metrics</span>
-          </nav>
         </div>
       </header>
 
       {/* Hero */}
       <section className="container mx-auto px-6 pt-12 pb-8 relative">
-        <div className="absolute inset-0 grid-pattern opacity-[0.07] pointer-events-none" />
         <div className="relative max-w-3xl">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/30 text-xs text-primary font-semibold mb-4">
-            <span className="h-1.5 w-1.5 rounded-full bg-primary" />
-            Random Forest Ensemble · 250 Trees
+            Random Forest Regressor · trained on real King County home sales
           </div>
           <h1 className="text-4xl md:text-5xl font-bold leading-tight">
-            Predict real estate prices with{" "}
-            <span className="text-gradient">data-driven</span> precision.
+            Property price estimates, with the model's <span className="text-gradient">reasoning</span> shown.
           </h1>
           <p className="text-muted-foreground mt-4 text-lg max-w-2xl">
-            EstateMind blends location intelligence, feature engineering, and a tuned
-            Random Forest model trained on a public housing dataset to deliver explainable price estimates in real time.
+            Enter a property's details to get a price estimate, a confidence range, and which
+            features actually drove the number — all computed from a Random Forest trained on
+            real home-sale data, not a canned formula.
           </p>
         </div>
       </section>
@@ -166,7 +151,7 @@ const Index = () => {
       </main>
 
       <footer className="border-t border-border py-6 text-center text-xs text-muted-foreground">
-        EstateMind · Real Random Forest inference with Python and React
+        EstateMind — a Random Forest price model served by FastAPI, rendered with React
       </footer>
     </div>
   );
