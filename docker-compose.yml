@@ -1,0 +1,19 @@
+services:
+  api:
+    build:
+      context: .
+      target: api
+    environment:
+      LOG_LEVEL: INFO
+      CORS_ORIGINS: http://localhost:8080
+    ports:
+      - "8000:8000"
+
+  web:
+    build:
+      context: .
+      target: web
+    ports:
+      - "8080:80"
+    depends_on:
+      - api

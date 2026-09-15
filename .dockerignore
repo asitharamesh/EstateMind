@@ -1,0 +1,14 @@
+.git
+.venv
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+.env
+.env.*
+!.env.example
+frontend/dist
+frontend/public/data
+# Datasets and models are produced inside the image by the trainer stage.
+backend/assets
+docs
+.DS_Store

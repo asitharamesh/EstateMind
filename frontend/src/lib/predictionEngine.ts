@@ -1,12 +1,27 @@
-export type PropertyType = "apartment" | "house" | "villa" | "studio";
+import {
+  ApiClientError,
+  ApiServerError,
+  ApiUnreachableError,
+  ApiValidationError,
+  SERVER_ERROR_MESSAGE,
+  VALIDATION_MESSAGE,
+  apiRequest,
+} from "@/lib/api";
+import type { Metrics, ValidatedRegion } from "@/lib/regions";
 
+/** Body of POST /api/predict (backend/schemas.py::PredictionRequest). */
 export interface PredictionInput {
+  region: string;
+  zipcode: string;
   sqft: number;
   bedrooms: number;
   bathrooms: number;
-  city: string;
   ageYears: number;
-  propertyType: PropertyType;
+  // Not every region's dataset has these - see InputDomain in
+  // frontend/src/lib/regions.ts and backend/features.py::OPTIONAL_FIELDS.
+  grade?: number;
+  view?: number;
+  waterfront?: boolean;
 }
 
 export interface PredictionFactor {
@@ -16,193 +31,91 @@ export interface PredictionFactor {
   share: number;
 }
 
-export interface PredictionResult {
+export type Tier = "Budget" | "Mid-Range" | "Luxury";
+
+export interface ModelPrediction {
+  source: "model";
+  region: string;
+  regionLabel: string;
+  modelVersion: string;
   price: number;
+  priceBasis: string;
   pricePerSqft: number;
-  marketAvgPerSqft: number;
-  tier: "Budget" | "Mid-Range" | "Luxury";
-  tierScore: number;
-  confidence: number;
+  zipMedianPricePerSqft: number;
+  interval: { low: number; high: number; nominalCoverage: number; empiricalCoverage: number; method: string };
+  tier: {
+    label: Tier;
+    percentile: number;
+    budgetBelow: number;
+    luxuryFrom: number;
+    referenceSales: number;
+    reference: string;
+  };
   factors: PredictionFactor[];
-  range: { low: number; high: number };
-  metro?: {
-    city: string;
-    metro: string;
-    scaleVsTrainingMetro: number;
-    source: string;
-    asOf: string;
-  };
-  /** "model" when served by the live FastAPI + Random Forest backend,
-   * "offline-estimate" when the app fell back to the local heuristic
-   * because the backend was unreachable. Surface this in the UI so a
-   * fallback number is never presented as if it were the real model. */
-  source: "model" | "offline-estimate";
 }
 
-// Display metadata only (labels/regions for the dropdown) - no pricing
-// numbers live here. Real per-metro pricing comes from the backend's
-// metro_price_index.json, which is derived from Zillow's public ZHVI data
-// at training time (see backend/scripts/train_model.py).
-export const CITIES: Record<string, { label: string; region: string }> = {
-  "san-francisco": { label: "San Francisco", region: "West Coast" },
-  "new-york": { label: "New York", region: "East Coast" },
-  "los-angeles": { label: "Los Angeles", region: "West Coast" },
-  "seattle": { label: "Seattle", region: "West Coast" },
-  "boston": { label: "Boston", region: "East Coast" },
-  "miami": { label: "Miami", region: "South" },
-  "austin": { label: "Austin", region: "South" },
-  "chicago": { label: "Chicago", region: "Midwest" },
-  "denver": { label: "Denver", region: "Mountain" },
-  "atlanta": { label: "Atlanta", region: "South" },
-  "dallas": { label: "Dallas", region: "South" },
-  "phoenix": { label: "Phoenix", region: "Southwest" },
-};
-
-// Shared property-type display labels, so the form, the result card, and
-// the comparison view all describe the same value the same way.
-export const PROPERTY_TYPE_LABELS: Record<PropertyType, string> = {
-  studio: "Studio",
-  apartment: "Apartment",
-  house: "House",
-  villa: "Villa",
-};
-
-const PROPERTY_TYPE_MULT: Record<PropertyType, number> = {
-  studio: 0.85,
-  apartment: 1.0,
-  house: 1.18,
-  villa: 1.45,
-};
-
-function clamp(v: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, v));
+/** Used only when the API is unreachable. A documented baseline (zip median
+ * $/sqft x sqft) whose accuracy was measured on the same test split - not the
+ * trained model, and labelled as such everywhere it is shown. */
+export interface OfflineEstimate {
+  source: "offline-estimate";
+  region: string;
+  regionLabel: string;
+  price: number;
+  priceBasis: string;
+  pricePerSqft: number;
+  zipMedianPricePerSqft: number;
+  baseline: { method: string; metrics: Metrics };
 }
 
-export function getTierFromScore(score: number): PredictionResult["tier"] {
-  const normalizedScore = clamp(score, 0, 100);
-  if (normalizedScore < 38) return "Budget";
-  if (normalizedScore < 70) return "Mid-Range";
-  return "Luxury";
-}
+export type PredictionResult = ModelPrediction | OfflineEstimate;
 
-export function normalizeInput(input: PredictionInput): PredictionInput {
+export const OFFLINE_MESSAGE = "Offline estimate — live model unavailable.";
+
+export function offlineEstimate(input: PredictionInput, region: ValidatedRegion): OfflineEstimate {
+  const pricePerSqft = region.offlineBaseline.zipMedianPricePerSqft[input.zipcode];
+  if (pricePerSqft === undefined) {
+    throw new ApiClientError(0, `No offline baseline is available for zip code ${input.zipcode}.`);
+  }
   return {
-    ...input,
-    sqft: Math.round(clamp(input.sqft, 500, 8000)),
-    bedrooms: Math.round(clamp(input.bedrooms, 0, 10)),
-    // Whole bathrooms only - see PredictionForm.tsx and backend/schemas.py.
-    bathrooms: Math.round(clamp(input.bathrooms, 1, 8)),
-    ageYears: Math.round(clamp(input.ageYears, 0, 115)),
-  };
-}
-
-let cachedMetroIndex: Record<string, { zhviLatest: number; scaleVsTrainingMetro: number }> | null = null;
-
-/**
- * Offline fallback only: used when the FastAPI backend cannot be reached.
- * It reuses the same real, cited Zillow metro index the backend trains
- * with (fetched from the static /data/metro-price-index.json snapshot
- * written by backend/scripts/train_model.py) so even the fallback numbers are
- * anchored to real published data rather than an invented per-city
- * multiplier. If that snapshot itself can't be loaded, this throws rather
- * than silently guessing - callers must treat total failure as "no
- * estimate available".
- */
-async function loadMetroIndex() {
-  if (cachedMetroIndex) return cachedMetroIndex;
-  const response = await fetch("/data/metro-price-index.json");
-  if (!response.ok) throw new Error("Metro price index unavailable");
-  const data = await response.json();
-  cachedMetroIndex = data.cities;
-  return cachedMetroIndex!;
-}
-
-async function fallbackPredict(input: PredictionInput): Promise<PredictionResult> {
-  const normalizedInput = normalizeInput(input);
-  const metroIndex = await loadMetroIndex();
-  const metro = metroIndex[normalizedInput.city] ?? metroIndex["seattle"];
-
-  // Rough physical-value heuristic (NOT the trained model): a simple
-  // price-per-sqft baseline scaled by the same real Zillow metro ratio the
-  // backend uses. This exists purely so the UI degrades gracefully when the
-  // API is down - it is always labeled `source: "offline-estimate"`.
-  const basePricePerSqft = 220; // derived from the real training data's
-  // overall price/sqft_living average (~King County, 2014-15); see README.
-  const typeFactor = PROPERTY_TYPE_MULT[normalizedInput.propertyType];
-  const ageFactor = clamp(1 - normalizedInput.ageYears * 0.004, 0.7, 1.05);
-  const bedBathFactor = 0.85 + Math.log2(normalizedInput.bedrooms + normalizedInput.bathrooms + 1) * 0.08;
-
-  const trainingMetroPrice =
-    basePricePerSqft * normalizedInput.sqft * typeFactor * ageFactor * bedBathFactor;
-  const price = Math.round(trainingMetroPrice * metro.scaleVsTrainingMetro);
-  const pricePerSqft = Math.round(price / normalizedInput.sqft);
-  const marketAvgPerSqft = Math.round(metro.zhviLatest / 1910);
-
-  const ratioToMetro = price / metro.zhviLatest;
-  const tierScore = clamp(ratioToMetro * 50, 0, 100);
-  const tier = ratioToMetro < 0.7 ? "Budget" : ratioToMetro >= 1.4 ? "Luxury" : "Mid-Range";
-
-  const confidence = 55; // fixed, low: this is a heuristic, not a model - we
-  // don't pretend to know its uncertainty the way we do for the real
-  // tree-ensemble spread the backend reports.
-  const spread = 0.35;
-
-  return {
-    price,
-    pricePerSqft,
-    marketAvgPerSqft,
-    tier,
-    tierScore,
-    confidence,
-    factors: [],
-    range: {
-      low: Math.round(price * (1 - spread)),
-      high: Math.round(price * (1 + spread)),
-    },
     source: "offline-estimate",
+    region: region.key,
+    regionLabel: region.label,
+    price: Math.round(pricePerSqft * input.sqft),
+    priceBasis: region.model.dataset.priceBasis,
+    pricePerSqft: Math.round(pricePerSqft),
+    zipMedianPricePerSqft: Math.round(pricePerSqft),
+    baseline: { method: region.offlineBaseline.method, metrics: region.offlineBaseline.metrics },
   };
 }
 
-export async function predictPrice(input: PredictionInput): Promise<PredictionResult> {
-  const normalizedInput = normalizeInput(input);
-  const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
-  const url = `${baseUrl}/api/predict`;
-
+export async function predictPrice(input: PredictionInput, region: ValidatedRegion): Promise<PredictionResult> {
   try {
-    const response = await fetch(url, {
+    const data = await apiRequest<Omit<ModelPrediction, "source">>("/api/predict", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(normalizedInput),
+      body: JSON.stringify(input),
     });
-
-    if (response.ok) {
-      const data = await response.json();
-      return {
-        price: data.price,
-        pricePerSqft: data.pricePerSqft,
-        marketAvgPerSqft: data.marketAvgPerSqft,
-        tier: data.tier,
-        tierScore: data.tierScore,
-        confidence: data.confidence,
-        factors: data.factors,
-        range: data.range,
-        metro: data.metro,
-        source: "model",
-      };
-    }
+    return { ...data, source: "model" };
+  } catch (error) {
+    // Validation and server errors propagate: they must be shown as what they are.
+    if (!(error instanceof ApiUnreachableError)) throw error;
     console.warn(
-      `[predictPrice] ${url} responded ${response.status} - using the offline heuristic instead. ` +
-        "Is the backend running? (`npm run dev:api`, or `npm run dev:full` to start both.)",
+      "[predictPrice] API unreachable - showing the offline baseline estimate. " +
+        "Start the backend with `npm run dev:api` (or `npm run dev:full`).",
+      error,
     );
-  } catch (err) {
-    console.warn(
-      `[predictPrice] could not reach ${url} - using the offline heuristic instead. ` +
-        "Is the backend running? (`npm run dev:api`, or `npm run dev:full` to start both.)",
-      err,
-    );
+    return offlineEstimate(input, region);
   }
+}
 
-  return fallbackPredict(normalizedInput);
+export function describePredictionError(error: unknown): { kind: "validation" | "client" | "server"; message: string } {
+  if (error instanceof ApiValidationError) {
+    return { kind: "validation", message: [VALIDATION_MESSAGE, ...error.formErrors].join(" ") };
+  }
+  if (error instanceof ApiServerError) return { kind: "server", message: SERVER_ERROR_MESSAGE };
+  if (error instanceof ApiClientError) return { kind: "client", message: error.message };
+  return { kind: "server", message: SERVER_ERROR_MESSAGE };
 }
 
 export function formatCurrency(n: number) {
@@ -212,32 +125,9 @@ export function formatCurrency(n: number) {
 }
 
 export function formatCurrencyFull(n: number) {
-  return `$${n.toLocaleString()}`;
+  return `$${Math.round(n).toLocaleString()}`;
 }
 
-export interface ModelInsights {
-  featureImportance: { feature: string; importance: number }[];
-  correlationMatrix: { features: string[]; matrix: number[][] };
-  trainingHistory: { estimators: number; trainR2: number; oobR2: number }[];
-  metroPriceIndex: {
-    source: string;
-    sourceUrl: string;
-    trainingMetro: string;
-    trainingReferenceDate: string;
-    latestDate: string;
-    cities: Record<string, { metro: string; zhviLatest: number; scaleVsTrainingMetro: number }>;
-  };
-}
-
-/** Real model internals (feature importances, correlation matrix, learning
- * curve, cited metro index) computed once at training time by
- * backend/scripts/train_model.py and served by the backend - nothing here is
- * hardcoded in the frontend. */
-export async function fetchModelInsights(): Promise<ModelInsights> {
-  const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
-  const response = await fetch(`${baseUrl}/api/model-insights`);
-  if (!response.ok) {
-    throw new Error("Unable to load model insights");
-  }
-  return response.json();
+export function formatPercent(fraction: number, digits = 0) {
+  return `${(fraction * 100).toFixed(digits)}%`;
 }

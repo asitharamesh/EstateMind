@@ -17,6 +17,17 @@ export default defineConfig(() => ({
       "/api": {
         target: process.env.API_PROXY_TARGET || "http://127.0.0.1:8000",
         changeOrigin: true,
+        // Vite answers a refused upstream connection with a bare 500, which
+        // the client could not tell apart from a real server bug. Answer 502
+        // (no JSON body) instead - what a production gateway does - so the
+        // UI classifies it as "backend unreachable" (see src/lib/api.ts).
+        configure: (proxy) => {
+          proxy.on("error", (_err, _req, res) => {
+            if ("writeHead" in res && !res.headersSent && !res.writableEnded) {
+              res.writeHead(502, { "Content-Type": "text/plain" }).end("EstateMind API unreachable");
+            }
+          });
+        },
       },
     },
   },

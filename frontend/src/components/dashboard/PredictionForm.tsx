@@ -1,111 +1,114 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import { Controller, useForm, type Resolver } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { ArrowRight, Home, Loader2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { ArrowRight, Home, Loader2 } from "lucide-react";
-import { CITIES, PROPERTY_TYPE_LABELS, type PredictionInput, type PropertyType } from "@/lib/predictionEngine";
+import { ApiValidationError, VALIDATION_MESSAGE } from "@/lib/api";
+import { describePredictionError, type PredictionInput } from "@/lib/predictionEngine";
+import {
+  buildPredictionSchema,
+  defaultFormValues,
+  type PredictionFormValues,
+} from "@/lib/predictionSchema";
+import { isValidated, type RegionEntry, type ValidatedRegion } from "@/lib/regions";
 
 interface PredictionFormProps {
-  onPredict: (input: PredictionInput) => void | Promise<void>;
-  loading: boolean;
+  regions: RegionEntry[];
+  onPredict: (input: PredictionInput) => Promise<unknown>;
 }
 
-const PROPERTY_TYPES = Object.entries(PROPERTY_TYPE_LABELS) as [PropertyType, string][];
+type FieldName = keyof PredictionFormValues;
+const FIELD_NAMES: FieldName[] = ["region", "zipcode", "sqft", "bedrooms", "bathrooms", "ageYears", "grade", "view", "waterfront"];
 
-// Mirrors the backend's clamp range (backend/valuation.py) so a value that
-// can't be submitted here can't silently be clamped to something else
-// server-side either - both layers agree on what's realistic. All three
-// fields are whole numbers only (the backend schema types them as `int`),
-// so bathrooms - like sqft and bedrooms - can't be a fraction such as 0.5.
-const NUMERIC_FIELDS = {
-  sqft: { min: 500, max: 8000, step: 50, label: "Square footage", unit: "sq ft" },
-  bedrooms: { min: 0, max: 10, step: 1, label: "Bedrooms", unit: "bedrooms" },
-  bathrooms: { min: 1, max: 8, step: 1, label: "Bathrooms", unit: "bathrooms" },
-} as const;
-
-type NumericField = keyof typeof NUMERIC_FIELDS;
-
-// Strips anything that isn't a digit as the user types, so a decimal point,
-// minus sign, or "e" (all valid in a native number input) can never end up
-// in one of these whole-number fields in the first place.
-function sanitizeIntegerInput(raw: string): string {
-  return raw.replace(/[^\d]/g, "");
+function Field({ id, label, hint, error, children }: { id: string; label: string; hint?: string; error?: string; children: ReactNode }) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor={id}>{label}</Label>
+        {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+      </div>
+      {children}
+      {error && (
+        <p className="text-xs text-destructive" id={`${id}-error`}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
 }
 
-// Belt-and-suspenders: sanitizeIntegerInput already blocks non-digit
-// characters on every keystroke, so this only matters for input methods
-// that bypass onChange filtering (e.g. paste, spinner arrows).
-function blockNonIntegerKeys(e: React.KeyboardEvent<HTMLInputElement>) {
-  if (["e", "E", "+", "-", "."].includes(e.key)) e.preventDefault();
-}
+const invalidClass = (error?: string) => (error ? "border-destructive focus-visible:ring-destructive" : undefined);
 
-function fieldError(field: NumericField, raw: string): string | null {
-  const { min, max, label, unit } = NUMERIC_FIELDS[field];
-  if (raw.trim() === "") return `${label} is required`;
-  const value = Number(raw);
-  if (Number.isNaN(value)) return `Enter a valid number`;
-  if (!Number.isInteger(value)) return `${label} must be a whole number`;
-  if (value < min) return `Must be at least ${min.toLocaleString()} ${unit}`;
-  if (value > max) return `Must be ${max.toLocaleString()} ${unit} or less`;
-  return null;
-}
+export function PredictionForm({ regions, onPredict }: PredictionFormProps) {
+  const validated = regions.filter(isValidated);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
-export function PredictionForm({ onPredict, loading }: PredictionFormProps) {
-  const [sqftInput, setSqftInput] = useState("1800");
-  const [bedroomsInput, setBedroomsInput] = useState("3");
-  const [bathroomsInput, setBathroomsInput] = useState("2");
-  const [city, setCity] = useState("seattle");
-  const [ageYears, setAgeYears] = useState(10);
-  const [propertyType, setPropertyType] = useState<PropertyType>("house");
-
-  const values: Record<NumericField, string> = {
-    sqft: sqftInput,
-    bedrooms: bedroomsInput,
-    bathrooms: bathroomsInput,
-  };
-  const setters: Record<NumericField, (v: string) => void> = {
-    sqft: setSqftInput,
-    bedrooms: setBedroomsInput,
-    bathrooms: setBathroomsInput,
-  };
-  const errors: Record<NumericField, string | null> = {
-    sqft: fieldError("sqft", sqftInput),
-    bedrooms: fieldError("bedrooms", bedroomsInput),
-    bathrooms: fieldError("bathrooms", bathroomsInput),
-  };
-  const hasErrors = Object.values(errors).some(Boolean);
-
-  const clampOnBlur = (field: NumericField) => {
-    const { min, max } = NUMERIC_FIELDS[field];
-    const raw = values[field];
-    const value = Number(raw);
-    if (raw.trim() === "" || Number.isNaN(value)) {
-      setters[field](String(min));
-      return;
+  // The schema depends on the selected region's domain, so it is rebuilt
+  // from the values being validated rather than captured once.
+  const resolver: Resolver<PredictionFormValues, unknown, PredictionInput> = (values, context, options) => {
+    const region = validated.find((r) => r.key === values.region);
+    if (!region) {
+      return { values: {}, errors: { region: { type: "validate", message: "Select a region with a validated model" } } };
     }
-    setters[field](String(Math.max(min, Math.min(max, Math.round(value)))));
+    // zodResolver's types don't carry the schema's transformed output type.
+    return zodResolver(buildPredictionSchema(region))(values, context, options) as ReturnType<
+      Resolver<PredictionFormValues, unknown, PredictionInput>
+    >;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (hasErrors) return;
-    onPredict({
-      sqft: Number(sqftInput),
-      bedrooms: Number(bedroomsInput),
-      bathrooms: Number(bathroomsInput),
-      city,
-      ageYears,
-      propertyType,
-    });
+  const form = useForm<PredictionFormValues, unknown, PredictionInput>({
+    mode: "onTouched",
+    defaultValues: validated[0] ? defaultFormValues(validated[0]) : undefined,
+    resolver,
+  });
+  const { errors, isSubmitting } = form.formState;
+  const regionKey = form.watch("region");
+  const region: ValidatedRegion | undefined = validated.find((r) => r.key === regionKey) ?? validated[0];
+
+  if (!region) {
+    return (
+      <Card className="shadow-card border-border">
+        <CardContent className="p-6 text-sm text-muted-foreground">
+          No region currently has a validated model, so no prediction can be made.
+        </CardContent>
+      </Card>
+    );
+  }
+  const domain = region.inputDomain;
+
+  const onValid = async (input: PredictionInput) => {
+    setSubmitError(null);
+    try {
+      await onPredict(input);
+    } catch (error) {
+      if (error instanceof ApiValidationError) {
+        for (const [field, message] of Object.entries(error.fieldErrors)) {
+          if ((FIELD_NAMES as string[]).includes(field)) {
+            form.setError(field as FieldName, { type: "server", message });
+          } else {
+            error.formErrors.push(`${field}: ${message}`);
+          }
+        }
+      }
+      setSubmitError(describePredictionError(error).message);
+    }
+  };
+
+  const onRegionChange = (key: string) => {
+    const next = validated.find((r) => r.key === key);
+    if (!next) return;
+    const defaults = defaultFormValues(next);
+    form.setValue("region", key);
+    form.setValue("zipcode", defaults.zipcode);
+    form.setValue("grade", defaults.grade);
+    form.setValue("view", defaults.view);
+    form.setValue("waterfront", defaults.waterfront);
   };
 
   return (
@@ -119,131 +122,165 @@ export function PredictionForm({ onPredict, loading }: PredictionFormProps) {
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="sqft">Square Footage</Label>
-              <span className="text-xs text-muted-foreground">500 - 8,000 sq ft</span>
-            </div>
-            <Input
-              id="sqft"
-              type="number"
-              min={NUMERIC_FIELDS.sqft.min}
-              max={NUMERIC_FIELDS.sqft.max}
-              step={NUMERIC_FIELDS.sqft.step}
-              value={sqftInput}
-              aria-invalid={!!errors.sqft}
-              className={errors.sqft ? "border-destructive focus-visible:ring-destructive" : undefined}
-              onChange={(e) => setSqftInput(sanitizeIntegerInput(e.target.value))}
-              onKeyDown={blockNonIntegerKeys}
-              onBlur={() => clampOnBlur("sqft")}
+        <form onSubmit={form.handleSubmit(onValid, () => setSubmitError(VALIDATION_MESSAGE))} noValidate className="space-y-5">
+          <Field id="region" label="Region" error={errors.region?.message}>
+            <Controller
+              name="region"
+              control={form.control}
+              render={({ field }) => (
+                <Select value={field.value} onValueChange={onRegionChange}>
+                  <SelectTrigger id="region" aria-invalid={!!errors.region} className={invalidClass(errors.region?.message)}>
+                    <SelectValue placeholder="Select a region" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {regions.map((r) => (
+                      <SelectItem key={r.key} value={r.key} disabled={!isValidated(r)}>
+                        {r.label}
+                        {!isValidated(r) && <span className="text-muted-foreground"> · Not validated</span>}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             />
-            {errors.sqft && <p className="text-xs text-destructive">{errors.sqft}</p>}
-          </div>
+            <p className="text-[11px] text-muted-foreground">
+              Only regions with their own validated training data can be priced.
+            </p>
+          </Field>
+
+          <Field id="zipcode" label="Zip code" hint={`${domain.zipcodes.length} supported`} error={errors.zipcode?.message}>
+            <Input
+              id="zipcode"
+              inputMode="numeric"
+              maxLength={5}
+              list="zipcode-options"
+              aria-invalid={!!errors.zipcode}
+              className={invalidClass(errors.zipcode?.message)}
+              {...form.register("zipcode")}
+            />
+            <datalist id="zipcode-options">
+              {domain.zipcodes.map((zip) => (
+                <option key={zip} value={zip} />
+              ))}
+            </datalist>
+          </Field>
+
+          <Field
+            id="sqft"
+            label="Square footage"
+            hint={`${domain.sqft.min.toLocaleString()} – ${domain.sqft.max.toLocaleString()} sq ft`}
+            error={errors.sqft?.message}
+          >
+            <Input id="sqft" inputMode="numeric" aria-invalid={!!errors.sqft} className={invalidClass(errors.sqft?.message)} {...form.register("sqft")} />
+          </Field>
 
           <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="bedrooms">Bedrooms</Label>
-                <span className="text-xs text-muted-foreground">0 - 10</span>
-              </div>
-              <Input
-                id="bedrooms"
-                type="number"
-                min={NUMERIC_FIELDS.bedrooms.min}
-                max={NUMERIC_FIELDS.bedrooms.max}
-                step={NUMERIC_FIELDS.bedrooms.step}
-                value={bedroomsInput}
-                aria-invalid={!!errors.bedrooms}
-                className={errors.bedrooms ? "border-destructive focus-visible:ring-destructive" : undefined}
-                onChange={(e) => setBedroomsInput(sanitizeIntegerInput(e.target.value))}
-                onKeyDown={blockNonIntegerKeys}
-                onBlur={() => clampOnBlur("bedrooms")}
-              />
-              {errors.bedrooms && <p className="text-xs text-destructive">{errors.bedrooms}</p>}
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="bathrooms">Bathrooms</Label>
-                <span className="text-xs text-muted-foreground">1 - 8</span>
-              </div>
-              <Input
-                id="bathrooms"
-                type="number"
-                inputMode="numeric"
-                min={NUMERIC_FIELDS.bathrooms.min}
-                max={NUMERIC_FIELDS.bathrooms.max}
-                step={NUMERIC_FIELDS.bathrooms.step}
-                value={bathroomsInput}
-                aria-invalid={!!errors.bathrooms}
-                className={errors.bathrooms ? "border-destructive focus-visible:ring-destructive" : undefined}
-                onChange={(e) => setBathroomsInput(sanitizeIntegerInput(e.target.value))}
-                onKeyDown={blockNonIntegerKeys}
-                onBlur={() => clampOnBlur("bathrooms")}
-              />
-              {errors.bathrooms && <p className="text-xs text-destructive">{errors.bathrooms}</p>}
-            </div>
+            <Field id="bedrooms" label="Bedrooms" hint={`${domain.bedrooms.min} – ${domain.bedrooms.max}`} error={errors.bedrooms?.message}>
+              <Input id="bedrooms" inputMode="numeric" aria-invalid={!!errors.bedrooms} className={invalidClass(errors.bedrooms?.message)} {...form.register("bedrooms")} />
+            </Field>
+            <Field id="bathrooms" label="Bathrooms" hint={`${domain.bathrooms.min} – ${domain.bathrooms.max}`} error={errors.bathrooms?.message}>
+              <Input id="bathrooms" inputMode="numeric" aria-invalid={!!errors.bathrooms} className={invalidClass(errors.bathrooms?.message)} {...form.register("bathrooms")} />
+            </Field>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="city">City</Label>
-            <Select value={city} onValueChange={setCity}>
-              <SelectTrigger id="city">
-                <SelectValue placeholder="Select a city" />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.entries(CITIES).map(([key, meta]) => (
-                  <SelectItem key={key} value={key}>
-                    {meta.label}{" "}
-                    <span className="text-muted-foreground">· {meta.region}</span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          <Controller
+            name="ageYears"
+            control={form.control}
+            render={({ field }) => (
+              <Field id="age" label="Age at sale" hint={`${field.value} yrs`} error={errors.ageYears?.message}>
+                <Slider
+                  id="age"
+                  min={domain.ageYears.min}
+                  max={domain.ageYears.max}
+                  step={1}
+                  value={[field.value]}
+                  onValueChange={([value]) => field.onChange(value)}
+                />
+              </Field>
+            )}
+          />
 
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="age">Property Age</Label>
-              <span className="text-sm font-mono text-muted-foreground">{ageYears} yrs</span>
-            </div>
-            <Slider
-              id="age"
-              min={0}
-              max={115}
-              step={1}
-              value={[ageYears]}
-              onValueChange={([v]) => setAgeYears(v)}
+          {domain.grade && (
+            <Controller
+              name="grade"
+              control={form.control}
+              render={({ field }) => (
+                <Field id="grade" label="Construction grade" hint={`${domain.grade!.min} – ${domain.grade!.max}`} error={errors.grade?.message}>
+                  <Select value={field.value} onValueChange={field.onChange}>
+                    <SelectTrigger id="grade" aria-invalid={!!errors.grade} className={invalidClass(errors.grade?.message)}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Object.entries(domain.grade.labels).map(([level, label]) => (
+                        <SelectItem key={level} value={level}>
+                          {level} — {label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[11px] text-muted-foreground">
+                    Assessor building grade from the {region.model.dataset.name} records. The scale is specific to this
+                    region's assessments and does not transfer to other markets.
+                  </p>
+                </Field>
+              )}
             />
-          </div>
+          )}
 
-          <div className="space-y-2">
-            <Label>Property Type</Label>
-            <div className="grid grid-cols-2 gap-2">
-              {PROPERTY_TYPES.map(([value, label]) => (
-                <button
-                  type="button"
-                  key={value}
-                  onClick={() => setPropertyType(value)}
-                  className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
-                    propertyType === value
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-secondary/40 text-muted-foreground hover:bg-secondary/70"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
+          {(domain.view || domain.waterfront) && (
+            <div className="grid grid-cols-[1fr_auto] gap-4 items-start">
+              {domain.view && (
+                <Controller
+                  name="view"
+                  control={form.control}
+                  render={({ field }) => (
+                    <Field id="view" label="View quality" error={errors.view?.message}>
+                      <Select value={field.value} onValueChange={field.onChange}>
+                        <SelectTrigger id="view" aria-invalid={!!errors.view} className={invalidClass(errors.view?.message)}>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {Object.entries(domain.view.labels).map(([level, label]) => (
+                            <SelectItem key={level} value={level}>
+                              {level} — {label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                  )}
+                />
+              )}
+              {domain.waterfront && (
+                <Controller
+                  name="waterfront"
+                  control={form.control}
+                  render={({ field }) => (
+                    <Field id="waterfront" label="Waterfront" error={errors.waterfront?.message}>
+                      <div className="h-10 flex items-center">
+                        <Switch id="waterfront" checked={field.value} onCheckedChange={field.onChange} />
+                      </div>
+                    </Field>
+                  )}
+                />
+              )}
             </div>
-          </div>
+          )}
+          {!domain.grade && !domain.view && !domain.waterfront && (
+            <p className="text-[11px] text-muted-foreground">
+              {region.label}'s dataset doesn't record a construction grade, view rating or waterfront flag, so this
+              model doesn't use them.
+            </p>
+          )}
 
-          <Button
-            type="submit"
-            disabled={loading || hasErrors}
-            className="w-full"
-            size="lg"
-          >
-            {loading ? (
+          {submitError && (
+            <div role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {submitError}
+            </div>
+          )}
+
+          <Button type="submit" disabled={isSubmitting} className="w-full" size="lg">
+            {isSubmitting ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" /> Running model...
               </>

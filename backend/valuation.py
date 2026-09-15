@@ -1,170 +1,77 @@
-"""Turns a PredictionRequest into a full valuation response, using only the
-trained Random Forest and the real reference tables in `artifacts` - no
-hand-written pricing, confidence, or explanation formulas.
-"""
+"""Turns an admitted PredictionRequest into a valuation response using only
+the region's trained artifacts: the shared feature builder, the model, the
+calibrated interval and the region's own price reference. No multipliers,
+no defaults, no hand-written pricing."""
 from typing import Any
 
 import numpy as np
-import pandas as pd
 
-from backend.artifacts import FEATURE_LABELS, PROPERTY_TYPES
+from backend.artifacts import RegionBundle
+from backend.features import FEATURE_LABELS
+from backend.pipeline import admit_request
 from backend.schemas import PredictionRequest
+from backend.tiers import classify
+
+TOP_FACTORS = 6
 
 
-def _clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
-
-
-def _resolve_metro(artifacts: dict[str, Any], city: str) -> dict[str, Any]:
-    metro_index = artifacts["metro_price_index"]
-    key = city.lower().replace(" ", "-")
-    metro = metro_index["cities"].get(key)
-    if metro is None:
-        training_metro_key = metro_index["trainingMetro"].split(",")[0].lower().replace(" ", "-")
-        metro = metro_index["cities"][training_metro_key]
-    return metro
-
-
-def _build_feature_row(artifacts: dict[str, Any], request: PredictionRequest) -> pd.DataFrame:
-    sqft = _clamp(float(request.sqft), 500.0, 8000.0)
-    bedrooms = int(_clamp(float(request.bedrooms), 0.0, 10.0))
-    bathrooms = int(_clamp(float(request.bathrooms), 1.0, 8.0))
-    age_years = int(_clamp(float(request.ageYears), 0.0, 115.0))
-
-    property_type = request.propertyType.lower()
-    if property_type not in PROPERTY_TYPES:
-        property_type = "house"
-    defaults = artifacts["property_type_defaults"][property_type]
-
-    row = {
-        "sqft_living": sqft,
-        "bedrooms": bedrooms,
-        "bathrooms": bathrooms,
-        "floors": defaults["floors"],
-        "waterfront": defaults["waterfront"],
-        "view": defaults["view"],
-        "condition": defaults["condition"],
-        "grade": defaults["grade"],
-        "age": age_years,
-        "was_renovated": defaults["wasRenovated"],
-        # No address is collected, so we assume a typical location within the
-        # chosen metro (index of 1.0 = average zip). Cross-metro differences
-        # are handled separately via the real, cited Zillow ratio.
-        "zip_price_index": 1.0,
-        "property_type": PROPERTY_TYPES.index(property_type),
-    }
-    return pd.DataFrame([row])[artifacts["feature_columns"]]
-
-
-def _tree_ensemble_predictions(model: Any, features: pd.DataFrame) -> np.ndarray:
-    # Predict on the raw array, not the DataFrame: each sub-estimator was
-    # never fit with column names of its own (only the top-level ensemble
-    # tracks those), so handing it a DataFrame triggers a sklearn
-    # "fitted without feature names" warning on every one of the 250 trees.
+def tree_contributions(model: Any, features) -> tuple[float, np.ndarray]:
+    """Per-prediction attribution decomposed from the actual decision paths
+    through every tree (the algorithm the `treeinterpreter` package uses):
+    each split's change in node value is credited to the split feature."""
     x = features.to_numpy()
-    return np.array([tree.predict(x)[0] for tree in model.estimators_])
-
-
-def _tree_interpreter_contributions(model: Any, features: pd.DataFrame) -> tuple[float, np.ndarray]:
-    """Real per-prediction feature attribution, decomposed from the actual
-    decision paths taken through every tree in the forest (the same
-    algorithm the `treeinterpreter` package uses). No hand-written weighting
-    - the split points and leaf values come entirely from training."""
-    x = features.to_numpy()
-    n_features = x.shape[1]
-    contributions = np.zeros(n_features)
+    contributions = np.zeros(x.shape[1])
     bias_total = 0.0
-
     for estimator in model.estimators_:
         tree = estimator.tree_
-        node_indicator = estimator.decision_path(x)
-        node_index = node_indicator.indices[node_indicator.indptr[0]: node_indicator.indptr[1]]
+        path = estimator.decision_path(x)
+        nodes = path.indices[path.indptr[0] : path.indptr[1]]
         values = tree.value[:, 0, 0]
-
-        bias_total += values[node_index[0]]
-        for i in range(1, len(node_index)):
-            parent = node_index[i - 1]
-            feature_idx = tree.feature[parent]
-            contributions[feature_idx] += values[node_index[i]] - values[parent]
-
+        bias_total += values[nodes[0]]
+        for parent, child in zip(nodes[:-1], nodes[1:]):
+            contributions[tree.feature[parent]] += values[child] - values[parent]
     n = len(model.estimators_)
     return bias_total / n, contributions / n
 
 
-def predict_price(artifacts: dict[str, Any], request: PredictionRequest) -> dict[str, Any]:
-    model = artifacts["model"]
-    model_metrics = artifacts["metrics"]
-    feature_columns: list[str] = artifacts["feature_columns"]
+def value_request(bundle: RegionBundle, request: PredictionRequest) -> dict[str, Any]:
+    record = admit_request(bundle.spec, request)
+    features = bundle.spec.transform(record)
+    price = float(bundle.model.predict(features)[0])
+    low, high = bundle.interval.bounds(price)
+    _, contributions = tree_contributions(bundle.model, features)
 
-    features = _build_feature_row(artifacts, request)
-    training_metro_price = float(model.predict(features)[0])
-    tree_preds = _tree_ensemble_predictions(model, features)
-    _bias, contributions = _tree_interpreter_contributions(model, features)
+    total_abs = float(np.sum(np.abs(contributions))) or 1.0
+    factors = sorted(
+        (
+            {
+                "feature": column,
+                "label": FEATURE_LABELS[column],
+                "contribution": round(float(value), 2),
+                "share": round(float(abs(value) / total_abs), 4),
+            }
+            for column, value in zip(bundle.spec.feature_columns, contributions)
+        ),
+        key=lambda row: abs(row["contribution"]),
+        reverse=True,
+    )
 
-    metro = _resolve_metro(artifacts, request.city)
-    scale = metro["scaleVsTrainingMetro"]
-
-    price = int(round(training_metro_price * scale))
-    sqft = _clamp(float(request.sqft), 500.0, 8000.0)
-    price_per_sqft = max(1, int(round(price / sqft)))
-    market_avg_per_sqft = int(round(metro["zhviLatest"] / model_metrics["trainingMedianSqft"]))
-
-    # Real, empirical prediction interval: the spread of the 250 individual
-    # trees' predictions for this exact input, not a fabricated formula.
-    low_raw, high_raw = np.percentile(tree_preds, [10, 90])
-    range_low = int(round(low_raw * scale))
-    range_high = int(round(high_raw * scale))
-    spread_ratio = tree_preds.std() / max(tree_preds.mean(), 1.0)
-    confidence = round(_clamp(100 * (1 - spread_ratio), 45.0, 97.0), 1)
-
-    # Tier score: this property's percentile rank against the real
-    # distribution of training-set sale prices (scaled to the chosen metro
-    # the same way the price itself is), not an arbitrary multiplier against
-    # a single metro-average figure. Because the cutoffs are genuine
-    # tertiles of actual sales, Budget/Mid-Range/Luxury each cover a real
-    # (roughly equal) third of the market instead of almost everything
-    # landing in one bucket.
-    # Compare the metro-scaled dollar price directly against the unscaled
-    # training-set price distribution: scaling both sides by the same metro
-    # factor would cancel out and make the tier city-invariant, which is not
-    # what we want - a $950k house should rank very differently in Chicago
-    # than in San Francisco.
-    percentile_curve = artifacts["price_percentiles"]
-    curve_prices = percentile_curve["prices"]
-    tier_score = round(_clamp(float(np.interp(price, curve_prices, percentile_curve["percentiles"])), 0.0, 100.0), 1)
-    budget_cutoff = curve_prices[33]
-    luxury_cutoff = curve_prices[67]
-    tier = "Budget" if price < budget_cutoff else "Luxury" if price >= luxury_cutoff else "Mid-Range"
-
-    scaled_contributions = contributions * scale
-    total_abs = float(np.sum(np.abs(scaled_contributions))) or 1.0
-    factor_rows = [
-        {
-            "feature": col,
-            "label": FEATURE_LABELS.get(col, col),
-            "contribution": round(float(contribution), 2),
-            "share": round(float(abs(contribution) / total_abs), 4),
-        }
-        for col, contribution in zip(feature_columns, scaled_contributions)
-    ]
-    factor_rows.sort(key=lambda row: abs(row["contribution"]), reverse=True)
-
+    card = bundle.card
     return {
-        "price": price,
-        "trainingMetroPrice": int(round(training_metro_price)),
-        "pricePerSqft": price_per_sqft,
-        "marketAvgPerSqft": market_avg_per_sqft,
-        "tier": tier,
-        "tierScore": tier_score,
-        "confidence": confidence,
-        "factors": factor_rows[:6],
-        "range": {"low": range_low, "high": range_high},
-        "metro": {
-            "city": request.city,
-            "metro": metro["metro"],
-            "scaleVsTrainingMetro": scale,
-            "source": artifacts["metro_price_index"]["source"],
-            "asOf": artifacts["metro_price_index"]["latestDate"],
+        "region": bundle.definition.key,
+        "regionLabel": bundle.definition.label,
+        "modelVersion": card["modelVersion"],
+        "price": round(price),
+        "priceBasis": bundle.definition.dataset.price_basis,
+        "pricePerSqft": round(price / record["sqft_living"]),
+        "zipMedianPricePerSqft": round(bundle.zip_median_ppsf[record["zipcode"]]),
+        "interval": {
+            "low": round(float(low)),
+            "high": round(float(high)),
+            "nominalCoverage": bundle.interval.nominal_coverage,
+            "empiricalCoverage": card["evaluation"]["interval"]["empiricalCoverage"],
+            "method": card["interval"]["method"],
         },
-        "modelMetrics": model_metrics,
+        "tier": classify(price, bundle.reference),
+        "factors": factors[:TOP_FACTORS],
     }

@@ -1,4 +1,4 @@
-import type { PredictionResult } from "@/lib/predictionEngine";
+import type { Tier } from "@/lib/predictionEngine";
 
 // Shared recharts styling so every chart in the app reads from the same
 // theme tokens and dark-mode contrast fix in one place, instead of each
@@ -33,8 +33,14 @@ export const CHART_CATEGORICAL_COLORS = [
   "hsl(var(--chart-6))",
 ];
 
-export const TIER_CHART_COLOR: Record<PredictionResult["tier"], string> = {
+export const TIER_CHART_COLOR: Record<Tier, string> = {
   Budget: "hsl(var(--tier-budget))",
   "Mid-Range": "hsl(var(--tier-mid))",
   Luxury: "hsl(var(--tier-luxury))",
+};
+
+export const TIER_BADGE_STYLES: Record<Tier, string> = {
+  Budget: "bg-tier-budget/15 text-tier-budget border-tier-budget/40",
+  "Mid-Range": "bg-tier-mid/15 text-tier-mid border-tier-mid/40",
+  Luxury: "bg-tier-luxury/15 text-tier-luxury border-tier-luxury/40",
 };

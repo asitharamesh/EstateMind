@@ -1,83 +1,116 @@
-"""Loads the artifacts backend/scripts/train_model.py writes: the trained
-model plus every real, data-derived reference table the API needs (metrics,
-feature importances, correlation matrix, training curve, per-property-type
-defaults, and the cited cross-metro price index). Nothing here is
-hand-typed - if an artifact is missing, this fails loudly and tells you to
-run the training script rather than falling back to a guess.
+"""Per-region model artifacts: writing them after training and loading them
+for serving. Layout (one directory per validated region):
+
+  <OUTPUT_DIR>/regions/<region>/
+    model.pkl              trained RandomForestRegressor
+    feature_spec.json      fitted FeatureSpec (feature order, zip encoding, domain)
+    model_card.json        dataset, split, hyperparameters, test metrics, interval
+    market_reference.json  training sale prices (tier reference), zip median $/sqft
+    insights.json          feature importance, correlations, learning curve
+
+If a region has a dataset but no artifacts, loading fails loudly instead of
+guessing.
 """
 import json
 import os
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.features import FeatureSpec
+from backend.regions import REGIONS, RegionDefinition
+from backend.tiers import PriceReference
+from backend.uncertainty import PredictionInterval
+
 BACKEND_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "assets"))
-OUTPUT_DIR_PATH = OUTPUT_DIR if OUTPUT_DIR.is_absolute() else BACKEND_DIR / OUTPUT_DIR
-
-PROPERTY_TYPES = ["studio", "apartment", "house", "villa"]
-
-FEATURE_LABELS = {
-    "sqft_living": "Square Footage",
-    "bedrooms": "Bedrooms",
-    "bathrooms": "Bathrooms",
-    "floors": "Floors",
-    "waterfront": "Waterfront",
-    "view": "View Quality",
-    "condition": "Condition",
-    "grade": "Construction Grade",
-    "age": "Property Age",
-    "was_renovated": "Renovated",
-    "zip_price_index": "Location (within metro)",
-    "property_type": "Property Type",
-}
 
 
-def _resolve_artifact_path(env_name: str, default: Path) -> Path:
-    raw_value = os.getenv(env_name)
-    if not raw_value:
-        return default
-
-    candidate = Path(raw_value)
-    if candidate.is_absolute():
-        return candidate
-    if "/" in raw_value or "\\" in raw_value:
-        return BACKEND_DIR / candidate
-    return OUTPUT_DIR_PATH / candidate
+def artifacts_root() -> Path:
+    raw = Path(os.getenv("OUTPUT_DIR", "assets"))
+    return raw if raw.is_absolute() else BACKEND_DIR / raw
 
 
-MODEL_PATH = _resolve_artifact_path("MODEL_FILE", OUTPUT_DIR_PATH / "random_forest_model.pkl")
-METRICS_PATH = _resolve_artifact_path("METRICS_FILE", OUTPUT_DIR_PATH / "model_metrics.json")
-FEATURES_PATH = _resolve_artifact_path("FEATURES_FILE", OUTPUT_DIR_PATH / "feature_columns.json")
-FEATURE_IMPORTANCE_PATH = OUTPUT_DIR_PATH / "feature_importance.json"
-CORRELATION_PATH = OUTPUT_DIR_PATH / "correlation_matrix.json"
-TRAINING_HISTORY_PATH = OUTPUT_DIR_PATH / "training_history.json"
-PROPERTY_TYPE_DEFAULTS_PATH = OUTPUT_DIR_PATH / "property_type_defaults.json"
-METRO_PRICE_INDEX_PATH = OUTPUT_DIR_PATH / "metro_price_index.json"
-PRICE_PERCENTILES_PATH = OUTPUT_DIR_PATH / "price_percentiles.json"
+def region_dir(region: str, root: Path | None = None) -> Path:
+    return (root or artifacts_root()) / "regions" / region
 
 
-def _load_json(path: Path) -> Any:
+class ArtifactsMissingError(FileNotFoundError):
+    pass
+
+
+@dataclass(frozen=True)
+class RegionBundle:
+    definition: RegionDefinition
+    spec: FeatureSpec
+    model: Any
+    interval: PredictionInterval
+    reference: PriceReference
+    zip_median_ppsf: dict[str, float]
+    card: dict
+    insights: dict
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _read_json(path: Path) -> Any:
     if not path.exists():
-        raise FileNotFoundError(f"Required artifact not found at {path}. Run `npm run train:model` first.")
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+        raise ArtifactsMissingError(f"Required artifact not found at {path}. Run `npm run train:model` first.")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_artifacts() -> dict[str, Any]:
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"Model file not found at {MODEL_PATH}. Run `npm run train:model` first.")
-    with MODEL_PATH.open("rb") as handle:
+def write_region_artifacts(trained, card: dict, insights: dict, root: Path | None = None) -> Path:
+    directory = region_dir(trained.region, root)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "model.pkl").open("wb") as handle:
+        pickle.dump(trained.model, handle)
+    _write_json(directory / "feature_spec.json", trained.spec.to_dict())
+    _write_json(directory / "model_card.json", card)
+    _write_json(
+        directory / "market_reference.json",
+        {
+            "description": trained.reference.description,
+            "sortedPrices": trained.reference.sorted_prices.tolist(),
+            "zipMedianPricePerSqft": trained.zip_median_ppsf,
+        },
+    )
+    _write_json(directory / "insights.json", insights)
+    return directory
+
+
+def load_region_bundle(region: str, root: Path | None = None) -> RegionBundle:
+    directory = region_dir(region, root)
+    model_path = directory / "model.pkl"
+    if not model_path.exists():
+        raise ArtifactsMissingError(f"Model for region '{region}' not found at {model_path}. Run `npm run train:model` first.")
+    with model_path.open("rb") as handle:
         model = pickle.load(handle)
+    spec = FeatureSpec.from_dict(_read_json(directory / "feature_spec.json"))
+    if list(getattr(model, "feature_names_in_", [])) != spec.feature_columns:
+        raise ValueError(
+            f"Model at {model_path} was trained on {getattr(model, 'feature_names_in_', None)}, "
+            f"expected {spec.feature_columns}"
+        )
+    # One request is one row: thread fan-out costs more than it saves.
+    model.set_params(n_jobs=1)
 
-    return {
-        "model": model,
-        "metrics": _load_json(METRICS_PATH),
-        "feature_columns": _load_json(FEATURES_PATH),
-        "feature_importance": _load_json(FEATURE_IMPORTANCE_PATH),
-        "correlation_matrix": _load_json(CORRELATION_PATH),
-        "training_history": _load_json(TRAINING_HISTORY_PATH),
-        "property_type_defaults": _load_json(PROPERTY_TYPE_DEFAULTS_PATH),
-        "metro_price_index": _load_json(METRO_PRICE_INDEX_PATH),
-        "price_percentiles": _load_json(PRICE_PERCENTILES_PATH),
-    }
+    card = _read_json(directory / "model_card.json")
+    market = _read_json(directory / "market_reference.json")
+    return RegionBundle(
+        definition=REGIONS[region],
+        spec=spec,
+        model=model,
+        interval=PredictionInterval.from_dict(card["interval"]),
+        reference=PriceReference.from_prices(market["sortedPrices"], market["description"]),
+        zip_median_ppsf=market["zipMedianPricePerSqft"],
+        card=card,
+        insights=_read_json(directory / "insights.json"),
+    )
+
+
+def load_validated_bundles(root: Path | None = None) -> dict[str, RegionBundle]:
+    """Every region that has a dataset must have artifacts; regions without a
+    dataset are simply not served."""
+    return {key: load_region_bundle(key, root) for key, region in REGIONS.items() if region.has_dataset}

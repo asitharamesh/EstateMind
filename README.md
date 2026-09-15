@@ -1,197 +1,228 @@
 # EstateMind
 
-EstateMind is a full-stack real-estate valuation application that combines a React + TypeScript frontend, a FastAPI backend, and a trained Random Forest Regressor to deliver explainable property price predictions. Every prediction is computed by a real model trained on real King County, WA home-sale records — there are no hard-coded prices or canned formulas anywhere in the app.
+EstateMind is a full-stack house-price estimator: a React + TypeScript frontend, a FastAPI backend, and
+**region-specific Random Forest models** trained on recorded home sales. Each prediction comes with a calibrated
+prediction interval, a market tier relative to that region's own sales, and a per-feature explanation.
 
-## Features
+**Model performance is region-specific and measured separately per region.** Today two regions have a validated
+model, each trained and scored only on its own sales - there is no shared model and no cross-region multiplier:
 
-- **Live price predictions** — enter square footage, bedrooms, bathrooms, city, age, and property type to get an instant estimate from a trained Random Forest model.
-- **Explainable results** — a donut chart shows each top feature's share of the model's total price adjustment (with direction and real dollar contributions called out separately), plus a confidence score and a 10th–90th percentile price range, all derived from the actual tree ensemble.
-- **Market positioning** — a Budget / Mid-Range / Luxury tier gauge (genuine percentile rank against real training-sale prices — see "Market tier" below) and a price-per-square-foot comparison against the local market average.
-- **Cross-metro pricing** — the model trains on Seattle-area data only; other supported cities are adjusted using a real, cited Zillow Home Value Index (ZHVI) ratio, not a guessed multiplier.
-- **Comparison view** — save up to three predictions side by side, each with an optional custom name (defaults to "{property type} in {city}" if left blank).
-- **Model insights dashboard** — feature importance, a training learning curve (train vs. out-of-bag R²), a feature correlation matrix, and the full cross-metro price index, all served live from the backend.
-- **Input validation on both ends** — the form only accepts realistic values (e.g. 500–8,000 sq ft) and shows an inline error before you can submit; the API independently rejects out-of-range requests with a clear message.
-- **Graceful offline fallback** — if the backend is unreachable, the UI falls back to a clearly-labeled local heuristic instead of failing silently.
+> **Seattle / King County model (v2.0.0): R² = 0.858, MAE = $79,120** on 4,315 held-out 2014–15 King County sales.
+> **Chicago / Cook County model (v2.0.0): R² = 0.798, MAE = $71,400** on ~8,600 held-out 2018–19 Cook County
+> single-family sales. Both splits are grouped by property, so no house appears in both train and test, and both
+> score through the same validation and feature pipeline the API uses for live requests.
 
-## Technology stack
+Prices are in each dataset's own price basis - **nominal sale prices at the time of that dataset's sales, not
+today's market** - and the two regions cover different years, so their prices are not comparable to each other.
 
-**Frontend**
-- React 18 + TypeScript, built with Vite
-- Tailwind CSS + shadcn/ui (Radix primitives) for the component system
-- Recharts for the model-insights charts
-- Vitest + Testing Library for tests
+Chicago's dataset has a construction-quality rating (used as its "grade" field, a 3-level scale specific to Cook
+County's assessor) but no rated view field and no waterfront flag - unlike King County, whose dataset has all
+three. The model, API and form for a region only ever use the fields that region's own dataset actually has; see
+`backend/features.py::OPTIONAL_FIELDS`.
 
-**Backend**
-- Python, FastAPI, Pydantic, Uvicorn
-- scikit-learn (`RandomForestRegressor`), pandas, numpy
+| Region | Status | Dataset | Test R² | Test MAE |
+|---|---|---|---|---|
+| Seattle / King County, WA | Validated | King County sales 2014-05 → 2015-05 | 0.858 | $79,120 |
+| Chicago / Cook County, IL | Validated | Cook County single-family sales 2018-10 → 2019-12 | 0.798 | $71,400 |
+| San Francisco Bay Area, CA | **Not validated** — no dataset | — | — | — |
+| Los Angeles, CA | **Not validated** — no dataset | — | — | — |
+| Austin, TX | **Not validated** — no dataset | — | — | — |
+| New York City, NY | **Not validated** — no dataset | — | — | — |
 
-**Tooling**
-- npm workspaces (root orchestrates the `frontend/` package; `concurrently` runs both dev servers together)
-- dotenv-based configuration shared by both sides
+Unvalidated regions are listed in the UI and API, but a prediction request for one returns
+*"Prediction unavailable for this region — insufficient validated training data."* There are no cross-city price
+multipliers.
 
-## Project structure
+The full design, the v1 postmortem, and every benchmark are in [`docs/SYSTEM_DESIGN.md`](docs/SYSTEM_DESIGN.md).
+
+---
+
+## What changed in v2 (short version)
+
+v1 reported R² 0.84, but that score used six features the app never collected. The live API filled them with defaults
+and a constant zip signal, and through those real inputs the model scored **R² 0.48, MAE $169k**. v2:
+
+- trains only on what the form collects: sqft, bedrooms, bathrooms, age, zip code, grade, view, waterfront;
+- uses **one** feature builder (`backend/features.py`) for training, evaluation and inference;
+- evaluates by pushing held-out rows through the real request contract, with a CI test that fails if that number
+  regresses or stops matching what the UI reports;
+- rejects unknown regions, zip codes, grades, views and fields with HTTP 422 instead of silently substituting values;
+- removes the Zillow city multiplier, the rule-derived "property type" and the uncalibrated "confidence %";
+- ranks tiers against the region's own sales in the same price basis (v1 put 99.95% of Seattle homes in "Luxury");
+- replaces the 67%-coverage "10th–90th percentile" range with an interval calibrated to 80% (measured: 80.2%);
+- shows the offline estimate **only** when the API is unreachable, never for validation or server errors;
+- splits train/test by property id (v1 had 60 houses in both), and shrinks the model from 229 MB to 38 MB.
+
+## Architecture
 
 ```text
-frontend/                  All frontend code
-  src/
-    components/
-      dashboard/            PredictionForm, PredictionResultCard, CompareView, ModelInsights
-      ui/                    shadcn/ui primitives (button, card, input, select, ...)
-    hooks/                   Small reusable React hooks
-    lib/
-      predictionEngine.ts    API client + offline fallback heuristic + shared types
-      modelMetrics.ts        Model metrics fetch + normalization
-    pages/                   Route-level pages (Index, NotFound)
-    test/                    Vitest unit tests
-    App.tsx, main.tsx, index.css
-  public/                    Static assets + generated data/ snapshots (gitignored)
-  index.html, vite.config.ts, tailwind.config.ts, tsconfig*.json, package.json
-
-backend/                   All backend/API/model code
-  app.py                    FastAPI app, CORS, and route definitions only
-  artifacts.py               Resolves artifact paths and loads the trained model + reference tables
-  valuation.py                Feature building, prediction, confidence, and explanation logic
-  schemas.py                  Request/response models (with realistic value bounds)
-  scripts/
-    train_model.py            Downloads real data, trains the model, writes all artifacts
-  requirements.txt            Pinned Python dependencies
-  assets/                     Downloaded dataset + trained model artifacts (gitignored, regenerated)
-
-package.json                Root orchestrator (workspaces: ["frontend"]) - dev/build/test/lint scripts
-.env / .env.example          Shared configuration for both frontend and backend
-.venv/                       Local Python virtual environment (gitignored)
+backend/
+  app.py              FastAPI routes, error → status mapping, startup model loading
+  schemas.py          Strict request contract (pydantic, extra fields forbidden)
+  regions.py          Region registry (which markets exist, which have data)
+  datasets.py         Dataset provenance + SHA-256 pin, raw → canonical records
+  features.py         The shared feature builder (FeatureSpec: validate, transform, serialise)
+  pipeline.py         Admission gate shared by API, training and evaluation
+  training.py         Grouped split, model fit, insights
+  evaluation.py       Production-style evaluation + metrics
+  uncertainty.py      OOB-calibrated prediction interval
+  tiers.py            Region-relative percentile / tier
+  valuation.py        Prediction response + tree-path attribution
+  artifacts.py        Per-region artifact write/load
+  catalog.py          Region catalog (API + offline snapshot)
+  observability.py    JSON logging, request ids
+  scripts/train_model.py      npm run train:model
+  scripts/benchmark_model.py  npm run benchmark:model
+  tests/              pytest: features, contract, tiers, interval, API, performance guard
+frontend/src/
+  lib/api.ts              fetch wrapper with error classification
+  lib/regions.ts          region catalog types + loading
+  lib/predictionSchema.ts zod schema generated from a region's input domain
+  lib/predictionEngine.ts predict + offline baseline
+  components/dashboard/   PredictionForm (React Hook Form), PredictionResultCard, CompareView, ModelInsights
+  test/                   vitest: API errors, fallback rules, schema, form, result card
+Dockerfile, docker-compose.yml, deploy/nginx.conf, .github/workflows/ci.yml
+docs/SYSTEM_DESIGN.md, docs/benchmarks/seattle.json
 ```
 
-## How the frontend works
+Request flow: `PredictionForm` (zod) → `POST /api/predict` → `PredictionRequest` → region routing →
+`FeatureSpec.validate_record` → `FeatureSpec.transform` → model → interval, tier, attribution → UI.
 
-The UI is a single-page app (`frontend/src/pages/Index.tsx`) with three tabs:
+## Dataset (Seattle / King County)
 
-1. **Prediction** — `PredictionForm` collects property details with realistic input constraints (min/max on every numeric field, inline validation errors, and a disabled submit button while any field is out of range) and calls `predictPrice()`.
-2. **Compare** — up to three saved predictions rendered side by side.
-3. **Model Insights** — fetches `/api/model-insights` and `/api/model-metrics` and renders them as charts and tables.
+- **Source:** "House Sales in King County, USA" (Kaggle), fetched from a GitHub mirror and verified against a pinned
+  SHA-256 before training. Listed as CC0 on Kaggle; verify before commercial use.
+- **Size:** 21,613 sales, 21 columns, no missing values; one physically impossible row removed (33 bedrooms in
+  1,620 sqft).
+- **Split:** grouped by property id: 17,291 train / 4,321 test sales, 176 repeat-sold properties, 0 shared across
+  the split. 31 train and 6 test sales fall outside the accepted input domain and are excluded (counts reported).
+- **Leakage finding:** the 60 shared houses in v1's random split did not inflate its score. Over 5 seeds random and
+  grouped splits give R² 0.855 ± 0.008 vs 0.858 ± 0.004, and repeat sales are harder to predict, not easier.
 
-All API access goes through `frontend/src/lib/predictionEngine.ts` and `modelMetrics.ts`, which normalize/clamp input, call the backend, and fall back to a local, clearly-labeled heuristic (`source: "offline-estimate"`) if the backend can't be reached — so the UI degrades gracefully instead of breaking.
+## Dataset (Chicago / Cook County)
 
-## How the backend works
+- **Source:** Cook County, IL Assessor's Office open data - single-family residential sales
+  (`modeling_group='SF'`), fetched from `datacatalog.cookcountyil.gov` (no auth required). Published by Cook
+  County government; verify current terms before commercial use.
+- **ZIP codes are derived, not provided:** the source has no ZIP field, only a parcel centroid. This project's
+  extract (`backend/assets/chicago_house_data.csv`, pinned by SHA-256) assigns each sale a ZIP via a
+  point-in-polygon join against the Census Bureau's 2020 cartographic ZCTA5 boundaries.
+- **Size:** 44,981 single-family sales (sale price > $10,000, 1–10 bedrooms, 500–8,000 sqft), 159 of 165 resolved
+  ZIP codes have ≥ 20 sales.
+- **No view or waterfront field exists in this dataset.** The model, API and form for this region simply don't use
+  those fields - see `backend/features.py::OPTIONAL_FIELDS` and the "Optional fields" note below. Its "age" is the
+  assessor's current effective age, not necessarily age at the historical sale date (the source has no year-built
+  field), unlike King County's exact age-at-sale.
 
-FastAPI (`backend/app.py`) loads the trained model and its reference tables once at startup (`backend/artifacts.py`) and exposes three endpoints:
+## Model
 
-- `GET /health` — liveness check
-- `GET /api/model-metrics` / `GET /api/model-insights` — real, training-time-computed metrics, feature importances, correlation matrix, learning curve, and the cross-metro price index
-- `POST /api/predict` — validates the request against realistic bounds (`backend/schemas.py`), builds the feature row, runs inference through the Random Forest, and returns the price, range, confidence, tier, and per-feature contribution factors (`backend/valuation.py`)
+- `RandomForestRegressor(n_estimators=100, max_depth=18, min_samples_leaf=3)`, 38 MB, about 10 ms per prediction
+  including attribution.
+- **Chosen by** grouped 5-fold CV on the training split, not on the test set. Compared against 50/150/250 trees and
+  min leaf 1/3/5, it is within 0.003 CV R² of the best configuration at a sixth of the size (table in the design doc).
+- **Removed features** (`property_type`, `floors`, `condition`, `was_renovated`) each change CV R² by < 0.001.
+- **Metrics (Seattle, 4,315 test sales):** R² 0.8584 · MAE $79,120 · RMSE $137,724 · MAPE 14.9%.
+  Baseline (zip median $/sqft × sqft): R² 0.768 · MAE $102,452.
+- **Metrics (Chicago, ~8,600 test sales):** R² 0.798 · MAE $71,400. Trained on 6 features instead of Seattle's 8
+  (no view or waterfront - see above), and the market includes far more distressed/low-price sales, which is why
+  its MAPE is higher than Seattle's despite a comparable MAE. Exact figures are in each region's model card
+  (`GET /api/regions`), not repeated here to avoid drifting out of sync with retraining.
+- **Prediction interval:** nominal 80%, calibrated on out-of-bag residuals; **measured coverage 80.2%** on test
+  sales (Budget 78.8%, Mid-Range 82.7%, Luxury 78.9%). It is a population-level coverage, not a per-home guarantee.
+- **Tier:** percentile of the predicted price among the region's training sales in the same price basis. Tertiles:
+  Budget < $360k, Luxury ≥ $565k (2014–15 dollars). Test predictions split 31% / 36% / 33%.
 
-`backend/scripts/train_model.py` is the only place that touches raw data: it downloads the real King County home-sale dataset and Zillow's public metro price index, trains the model, and writes every artifact the API and frontend rely on. Nothing about pricing is hand-typed anywhere else in the codebase.
+## API
 
-## How the frontend and backend communicate
+```http
+POST /api/predict
+{ "region": "seattle", "zipcode": "98103", "sqft": 1800, "bedrooms": 3, "bathrooms": 2,
+  "ageYears": 40, "grade": 7, "view": 0, "waterfront": false }
+```
 
-In development, the frontend calls relative `/api/*` paths, which Vite's dev server proxies to the FastAPI backend (`frontend/vite.config.ts`) — no CORS setup or `VITE_API_BASE_URL` needed locally. In production, set `VITE_API_BASE_URL` to point the built frontend at a deployed backend, and set `CORS_ORIGINS` on the backend to allow that origin.
+Returns `price`, `priceBasis`, `pricePerSqft`, `zipMedianPricePerSqft`, `interval {low, high, nominalCoverage,
+empiricalCoverage}`, `tier {label, percentile, budgetBelow, luxuryFrom}`, `factors[]` and `modelVersion`.
 
-## Installation
+| Status | Meaning |
+|---|---|
+| 422 | invalid or unknown field value, unsupported zip/grade/view, unknown region, or a region with no validated model; `detail[].loc` names the field |
+| 500 | unexpected server error (generic message; details only in server logs) |
 
-### Prerequisites
-- Node.js 18+
-- Python 3.11+
+Also: `GET /health`, `GET /api/regions` (status, model card and input domain per region),
+`GET /api/regions/{region}/insights`.
 
-### Setup
+### Validation (enforced by the API, mirrored in the form)
+
+Bounds below are Seattle / King County's; every region has its own domain, returned per-region by
+`GET /api/regions` (`inputDomain`) and used to build that region's form. `zipcode`, `sqft`, `bedrooms`, `bathrooms`
+and `ageYears` are required for every region; `grade`, `view` and `waterfront` are each present only when that
+region's own dataset has the field (Chicago has `grade` but not `view` or `waterfront` - see above).
+
+| Field | Seattle / King County |
+|---|---|
+| zipcode | one of the 70 King County zips with ≥ 20 training sales |
+| sqft | 500 – 8,000 |
+| bedrooms | 0 – 10 (integer) |
+| bathrooms | 1 – 8, whole numbers only (the King County training data itself is ~69% fractional-bathroom sales; `PredictionRequest` still accepts that quarter-bath precision internally so training/evaluation aren't affected, but `POST /api/predict` only accepts whole numbers - see `backend/schemas.py::LivePredictionRequest`) |
+| ageYears | 0 – 115 (age at sale) |
+| grade | 4 – 13, King County Assessor building grade (labelled in the form) |
+| view | 0 – 4 (No rated view → Excellent) |
+| waterfront | true / false |
+
+## Error handling and the offline estimate
+
+| Situation | UI |
+|---|---|
+| Invalid input (client or API 422) | fields highlighted, "Please correct the highlighted inputs." |
+| Other 4xx | the API's message |
+| 5xx | "The prediction service encountered an error. Please try again." |
+| Network failure, timeout, or gateway 502/503/504 | "Offline estimate — live model unavailable." with a zip median $/sqft × sqft baseline (test R² 0.77), no tier, interval or explanation |
+
+## Setup
+
+Prerequisites: Node.js 18+ (20 in CI/Docker), Python 3.11+ (3.13 in CI/Docker).
+
 ```bash
-# Backend
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r backend/requirements.txt
-
-# Frontend (installs the root + frontend workspace together)
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements.txt -r backend/requirements-dev.txt
 npm install
-
-# Shared configuration
 cp .env.example .env
+
+npm run train:model     # download + verify dataset, train, evaluate, write artifacts (~10 s)
+npm run dev:full        # API on :8000, web on :8080
 ```
 
-### Train the model
+Other commands:
+
 ```bash
-npm run train:model
-```
-This downloads the real training data and Zillow metro index, trains the Random Forest, and writes all artifacts to `backend/assets/` and `frontend/public/data/`.
-
-### Run the app
-```bash
-npm run dev:full   # starts the FastAPI backend and the Vite frontend together
-```
-or, in two terminals:
-```bash
-npm run dev:api
-npm run dev
+npm run test:api          # backend tests (needs trained artifacts)
+npm test                  # frontend tests
+npm run typecheck && npm run lint && npm run build
+npm run benchmark:model   # regenerate docs/benchmarks/seattle.json (several minutes)
+docker compose up --build # trains inside the build; web :8080, API :8000
 ```
 
-Then open:
-- Frontend: http://localhost:8080
-- Backend API: http://localhost:8000/health
+Environment variables are documented in `.env.example` (`DATASET_URL`, `DATASET_PATH`, `OUTPUT_DIR`, `PUBLIC_DIR`,
+`CORS_ORIGINS`, `LOG_LEVEL`, `VITE_API_BASE_URL`, `API_PROXY_TARGET`).
 
-If the backend isn't running, prediction requests fall back to a clearly-labeled offline estimate and log a console warning explaining why — if you see that in the UI, start `npm run dev:api` (or `npm run dev:full`).
+## Infrastructure decisions
 
-### Other scripts
-```bash
-npm run build       # production frontend build (frontend/dist)
-npm run lint         # eslint
-npm test              # vitest
-```
+- **No database:** predictions are stateless and comparisons live in the browser. See the design doc.
+- **Docker + CI:** a multi-stage build trains once and feeds both images. CI trains, runs backend tests
+  (including the performance guard), frontend typecheck/lint/tests/build, and the Docker build.
+- **Structured logs:** JSON lines with request ids. No auth or rate limiting, since there are no users or
+  privileged operations; rate limiting belongs at the gateway.
 
-## Environment variables
+## Known limitations
 
-The project uses a single dotenv file at the repo root, shared by both the frontend build and the backend. See `.env.example` for the full list with defaults — none are required for local dev:
+- Only two validated regions (Seattle/King County, Chicago/Cook County); the rest need legitimate, documented
+  per-sale datasets with a real ZIP code, which is why they remain unavailable rather than guessed.
+- Prices are each region's own historical sale prices (2014–15 for Seattle, 2018–19 for Chicago), with no
+  validated adjustment to today's market and not comparable between the two regions.
+- Chicago's construction-quality "grade" is a coarser, less granular rating than Seattle's, and Chicago has no
+  view or waterfront signal at all - its model is weaker on location-driven price variation for that reason.
+- The test split is random in time, so no forward-in-time performance is measured.
+- The interval has a fixed relative width, and zip encoding is in-sample target encoding.
+- Grade is the most important feature and must be supplied by the user.
 
-- `VITE_API_BASE_URL` — only set to point the built frontend at a specific/deployed backend; leave unset locally to use the Vite dev proxy
-- `API_PROXY_TARGET` — only needed if the backend runs on a non-default host/port
-- `DATASET_URL`, `DATASET_PATH` — real King County home-sale CSV source (relative paths resolve under `backend/`)
-- `METRO_INDEX_URL` — Zillow Research ZHVI-by-metro CSV source
-- `OUTPUT_DIR`, `MODEL_FILE`, `METRICS_FILE`, `FEATURES_FILE` — model artifact locations (relative paths resolve under `backend/`)
-- `PUBLIC_DIR` — where generated frontend-served JSON snapshots are written (relative paths resolve at the repo root; defaults to `frontend/public`)
-- `CORS_ORIGINS` — allowed origins for the FastAPI backend
-
-## Model details
-
-- **Algorithm**: Random Forest Regressor (250 trees, max depth 18)
-- **Training source**: real King County, WA home-sale records (~21.6k transactions, May 2014–May 2015) — every row is an actual sale, not a synthetic formula
-- **Training approach**: 80/20 train/test split, real held-out evaluation
-
-Current held-out test-set performance (regenerate with `npm run train:model` — numbers vary slightly run to run as the upstream dataset and Zillow index update):
-- R²: ~0.84
-- MAE: ~$80,600
-- RMSE: ~$153,200
-- MAPE: ~14.7%
-
-### Dataset audit
-Every input feature was checked against its realistic domain range (see `backend/scripts/train_model.py::drop_impossible_rows`). The one genuine data-quality issue found: a single sale (id `2402100895`) recorded with **33 bedrooms in 1,620 sqft** — about 49 sqft/bedroom, far below what's physically habitable, and almost certainly a typo for 3 bedrooms. That row is dropped before training. Everything else — including the next-highest outlier (11 bedrooms in 3,000 sqft, ~272 sqft/bedroom) and the small number of 0-bedroom/0-bathroom sales (studio-style or open-plan listings) — is unusual but physically plausible, so it's left untouched.
-
-### Cross-metro adjustment
-The training data only covers the Seattle metro area, so the model itself only ever predicts a King County-equivalent price. To support the other 11 cities in the UI, `train_model.py` downloads Zillow Research's public [Metro ZHVI dataset](https://www.zillow.com/research/data/) and computes, for each city, the ratio of that metro's current typical home value to Seattle's typical home value at the training data's own reference period. The backend multiplies the model's raw prediction by this real, dated, cited ratio (`metro_price_index.json`).
-
-### Feature engineering
-Built entirely from columns that exist in the real sale records, plus features derived from them without inventing any price relationship: `sqft_living`, `bedrooms`, `bathrooms`, `floors`, `waterfront`, `view`, `condition`, `grade`, `age` (sale year − year built), `was_renovated`, `zip_price_index` (each zip's mean sale price relative to the training set, fit on the training split only), and `property_type` (a rule-assigned label whose price effect the model learns from data).
-
-At inference time, the app only collects sqft, bedrooms, bathrooms, age, city, and property type. The remaining features are filled from real, training-data-derived medians per property type (`property_type_defaults.json`).
-
-### Explainability and confidence
-- **Factor contributions**: the backend walks the actual decision path through all 250 trees and attributes the change in predicted value at each split to the feature that caused it (the same technique the `treeinterpreter` package uses).
-- **Confidence and price range**: the backend predicts with each of the 250 individual trees and uses the empirical spread of those predictions (10th–90th percentile for the range, coefficient of variation for the confidence score).
-
-### Market tier (Budget / Mid-Range / Luxury)
-The tier score is this property's percentile rank against the real distribution of training-set sale prices, scaled by the same cross-metro ratio applied to the price itself (`price_percentiles.json`, built from `np.percentile(y_train, 0..100)`). Budget/Mid-Range/Luxury are the 33rd/67th percentile cutoffs of that real distribution — genuine tertiles of actual sales, not a fixed multiplier against a single reference figure. (An earlier version compared price to the metro's overall ZHVI average with fixed 0.7×/1.4× cutoffs; because that average blends in far smaller/older homes than a typical prediction, almost every realistic input landed in "Mid-Range" regardless of how the inputs changed. The percentile-based version fixes that — see git history for the pre-fix formula.)
-
-## Input validation
-
-Realistic bounds are enforced in two layers that are kept in sync:
-
-| Field | Range |
-| --- | --- |
-| Square footage | 500 – 8,000 sq ft |
-| Bedrooms | 0 – 10 |
-| Bathrooms | 1 – 8 (whole numbers only) |
-| Property age | 0 – 115 years |
-
-- **Frontend** (`PredictionForm.tsx`): every numeric field shows its allowed range, blocks non-digit keystrokes (so a decimal point or minus sign can't be typed into a whole-number field at all), flags an out-of-range or non-integer value with an inline error message, and disables the submit button until every value is valid — so an unrealistic value can't be submitted from the UI.
-- **Backend** (`schemas.py`): the same bounds are enforced with Pydantic `Field` constraints, so a direct API request outside those bounds is rejected with a `422` response and a clear message, independent of the frontend.
-
-## Git readiness
-
-Local environment files, Python artifacts, and `node_modules` are gitignored so secrets and generated files are never committed accidentally.
+Future work is listed in [`docs/SYSTEM_DESIGN.md`](docs/SYSTEM_DESIGN.md#14-future-improvements).
